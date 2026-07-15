@@ -91,6 +91,12 @@ test("detects every process running from the Codex app bundle", () => {
   assert.deepEqual(findActiveCodexPids(processList), [101, 102]);
 });
 
+test("check validates the supported Codex build before an install is queued", async () => {
+  const source = await readFile(new URL("../src/theme-patch.mjs", import.meta.url), "utf8");
+  const checkBody = source.match(/async function check\(asarPath\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+  assert.match(checkBody, /await assertSupportedAppVersion\(asarPath\)/);
+});
+
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
