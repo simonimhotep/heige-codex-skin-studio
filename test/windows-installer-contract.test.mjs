@@ -31,12 +31,11 @@ test("Windows artifact journal precedes every stage and owns the only commit dec
   const skeleton = installer.indexOf("Write-HeiGeInstallJournal -Path $journalPath -Document $journal -Exclusive");
   const treePrepare = installer.indexOf('"participant-prepare"');
   const menuPrepare = installer.indexOf("Prepare-HeiGeStartMenuShortcut", treePrepare);
-  const apply = installer.indexOf('& (Join-Path $target "scripts\\windows\\apply.ps1")');
   const commit = installer.indexOf('-Phase "commit-decided" -Decision "commit"');
 
   assert.ok(skeleton >= 0 && skeleton < treePrepare);
   assert.ok(treePrepare < menuPrepare);
-  assert.ok(menuPrepare < apply && apply < commit);
+  assert.ok(menuPrepare < commit);
   assert.equal(installer.match(/-Decision\s+"commit"/g)?.length, 1);
   assert.match(installer, /FileOptions\]::WriteThrough/);
   assert.match(installer, /\.Flush\(\$true\)/);
@@ -56,4 +55,29 @@ test("Windows recovery is reverse before commit and roll-forward after commit", 
   );
   assert.match(installer, /if \(-not \$skipRequested\)[\s\S]*scripts\\windows\\apply\.ps1/);
   assert.doesNotMatch(installer, /::new\(|\?\?|\?\./);
+});
+
+test("Windows abandoned mutex ownership continues into durable recovery", async () => {
+  const installer = await readFile(installerPath, "utf8");
+  assert.match(
+    installer,
+    /function Enter-HeiGeInstallMutex[\s\S]*catch \[System\.Threading\.AbandonedMutexException\][\s\S]*return \$true/,
+  );
+  assert.match(
+    installer,
+    /\$ownsMutex = Enter-HeiGeInstallMutex -Mutex \$mutex[\s\S]*Recover-HeiGeWindowsInstall/,
+  );
+});
+
+test("Windows first apply starts only after artifact commit finalization and journal deletion", async () => {
+  const installer = await readFile(installerPath, "utf8");
+  const invoke = installer.indexOf("function Invoke-HeiGeWindowsInstall");
+  const commit = installer.indexOf('-Phase "commit-decided" -Decision "commit"');
+  const finalize = installer.indexOf("Complete-HeiGeWindowsInstall", commit);
+  const clear = installer.indexOf("[System.IO.File]::Delete($journalPath)", finalize);
+  const apply = installer.indexOf("Invoke-HeiGePostCommitApply", clear);
+
+  assert.ok(invoke >= 0 && commit > invoke && finalize > commit && clear > finalize && apply > clear);
+  assert.doesNotMatch(installer.slice(invoke, commit), /Invoke-HeiGePostCommitApply/);
+  assert.match(installer, /安装已完成，但首次应用失败，可重试 scripts\\windows\\apply\.ps1/);
 });

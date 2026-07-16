@@ -378,6 +378,26 @@ function Get-HeiGeInstallMutex {
     return New-Object System.Threading.Mutex($false, "Local\HeiGeSkinInstall-$digest")
 }
 
+function Enter-HeiGeInstallMutex {
+    param([Parameter(Mandatory = $true)]$Mutex)
+    try {
+        return [bool]$Mutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        # WaitOne transfers ownership before reporting that the prior owner died.
+        return $true
+    }
+}
+
+function Invoke-HeiGePostCommitApply {
+    param([Parameter(Mandatory = $true)][string]$ApplyScript)
+    try {
+        & $ApplyScript
+        if (-not $?) { throw "Windows apply did not complete successfully" }
+    } catch {
+        throw "安装已完成，但首次应用失败，可重试 scripts\windows\apply.ps1：$($_.Exception.Message)"
+    }
+}
+
 function Invoke-HeiGeWindowsInstall {
     [CmdletBinding(PositionalBinding = $false)]
     param(
@@ -409,7 +429,7 @@ function Invoke-HeiGeWindowsInstall {
     $mutex = Get-HeiGeInstallMutex -InstallRoot $target
     $ownsMutex = $false
     try {
-        $ownsMutex = $mutex.WaitOne(0)
+        $ownsMutex = Enter-HeiGeInstallMutex -Mutex $mutex
         if (-not $ownsMutex) { throw "another Windows artifact installation is still running" }
         Recover-HeiGeWindowsInstall -JournalPath $journalPath -Node $node `
             -TransactionScript $transactionScript | Out-Null
@@ -471,11 +491,6 @@ function Invoke-HeiGeWindowsInstall {
             $journal = Update-HeiGeInstallJournal -Path $journalPath -Document $journal `
                 -Phase "artifacts-published"
 
-            if (-not $skipRequested) {
-                & (Join-Path $target "scripts\windows\apply.ps1")
-                if (-not $?) { throw "Windows apply did not complete successfully" }
-            }
-
             $journal = Update-HeiGeInstallJournal -Path $journalPath -Document $journal `
                 -Phase "commit-decided" -Decision "commit"
             Complete-HeiGeWindowsInstall -Journal $journal -Node $node `
@@ -504,10 +519,16 @@ function Invoke-HeiGeWindowsInstall {
         }
 
         Write-Host "HeiGe Codex Skin Studio 已安装到：$target"
+        if (-not $skipRequested) {
+            Invoke-HeiGePostCommitApply `
+                -ApplyScript (Join-Path $target "scripts\windows\apply.ps1")
+        }
     } finally {
         if ($ownsMutex) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
     }
 }
 
-Invoke-HeiGeWindowsInstall @PSBoundParameters
+if ($MyInvocation.InvocationName -ne ".") {
+    Invoke-HeiGeWindowsInstall @PSBoundParameters
+}

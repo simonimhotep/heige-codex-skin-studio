@@ -4,6 +4,7 @@
 $script:RepositoryRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $script:InstallerPath = Join-Path $script:RepositoryRoot "scripts\windows\install.ps1"
 $script:InstallerSource = [System.IO.File]::ReadAllText($script:InstallerPath)
+. $script:InstallerPath
 
 try {
     Test-Case "Installer parses in the active PowerShell runtime" {
@@ -71,6 +72,52 @@ try {
         Assert-Match '\$stream\.Flush\(\$true\)' $script:InstallerSource
         Assert-Match '\[System\.IO\.FileOptions\]::WriteThrough' $script:InstallerSource
         Assert-Match '\[System\.IO\.File\]::Replace' $script:InstallerSource
+    }
+
+    Test-Case "Abandoned mutex notification retains acquired ownership" {
+        $fakeMutex = New-Object PSObject
+        $fakeMutex | Add-Member -MemberType ScriptMethod -Name WaitOne -Value {
+            throw (New-Object System.Threading.AbandonedMutexException)
+        }
+        Assert-True (Enter-HeiGeInstallMutex -Mutex $fakeMutex)
+    }
+
+    Test-Case "First apply follows commit finalization and journal deletion" {
+        $commit = $script:InstallerSource.IndexOf(
+            '-Phase "commit-decided" -Decision "commit"',
+            [System.StringComparison]::Ordinal
+        )
+        $finalize = $script:InstallerSource.IndexOf(
+            "Complete-HeiGeWindowsInstall",
+            $commit,
+            [System.StringComparison]::Ordinal
+        )
+        $clear = $script:InstallerSource.IndexOf(
+            '[System.IO.File]::Delete($journalPath)',
+            $finalize,
+            [System.StringComparison]::Ordinal
+        )
+        $apply = $script:InstallerSource.IndexOf(
+            "Invoke-HeiGePostCommitApply",
+            $clear,
+            [System.StringComparison]::Ordinal
+        )
+        Assert-True ($commit -ge 0 -and $finalize -gt $commit)
+        Assert-True ($clear -gt $finalize -and $apply -gt $clear)
+        Assert-Match "安装已完成，但首次应用失败，可重试" $script:InstallerSource
+    }
+
+    Test-Case "Postcommit apply failure reports installed artifacts without rollback language" {
+        $failureScript = Join-Path ([System.IO.Path]::GetTempPath()) `
+            ("heige-apply-failure-" + [guid]::NewGuid().ToString("N") + ".ps1")
+        try {
+            [System.IO.File]::WriteAllText($failureScript, 'throw "simulated apply failure"')
+            Assert-Throws {
+                Invoke-HeiGePostCommitApply -ApplyScript $failureScript
+            } "安装已完成，但首次应用失败，可重试"
+        } finally {
+            Remove-Item -LiteralPath $failureScript -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Test-Case "Precommit compensation reverses Start Menu before tree" {
