@@ -161,9 +161,37 @@ test("switch exposes accessible state and permanent re-enable guidance", async (
   assert.equal(page.switch.getAttribute("role"), "switch");
   assert.equal(page.switch.getAttribute("tabindex"), "0");
   assert.equal(page.switch.getAttribute("aria-checked"), "true");
+  assert.match(page.switch.getAttribute("aria-labelledby") ?? "", /persistence-title/);
+  assert.match(page.switch.getAttribute("aria-describedby") ?? "", /persistence-state/);
+  assert.match(page.switch.getAttribute("aria-describedby") ?? "", /persistence-helper/);
   assert.match(page.document.body.textContent, /关闭后本次继续使用；下次启动恢复原生界面/);
   assert.match(page.document.body.textContent, /HeiGe 皮肤启动器/);
   assert.match(page.document.body.textContent, /启用 HeiGe 皮肤/);
+});
+
+test("off confirmation is an announced dialog with Escape and focus restoration", async (t) => {
+  const pending = deferredResponse();
+  const page = await menuWindow({ fetch: () => pending.promise });
+  t.after(() => page.close());
+  await page.clickPersistenceSwitch();
+  assert.equal(page.confirmation.getAttribute("role"), "alertdialog");
+  assert.match(page.confirmation.getAttribute("aria-labelledby") ?? "", /persistence-confirmation-text/);
+  assert.match(page.confirmation.getAttribute("aria-describedby") ?? "", /persistence-helper/);
+  assert.equal(page.document.activeElement?.dataset.heigeRole, "persistence-cancel");
+  page.confirmation.dispatchEvent(new page.window.KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+  }));
+  await page.flush();
+  assert.equal(page.confirmation.hidden, true);
+  assert.equal(page.document.activeElement, page.switch);
+
+  await page.clickPersistenceSwitch();
+  await page.clickConfirmOff();
+  pending.resolve(okResponse({ persistenceEnabled: false, revision: 8 }));
+  await page.flush();
+  assert.equal(page.document.activeElement, page.switch);
 });
 
 test("off is painted only after the controller ACK", async (t) => {

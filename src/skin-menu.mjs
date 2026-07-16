@@ -784,9 +784,11 @@ export function buildSkinMenuScript({
     const headingCopy = document.createElement("div");
     headingCopy.style.cssText = "min-width:0;";
     const headingTitle = document.createElement("div");
+    headingTitle.id = data.menuId + "-persistence-title";
     headingTitle.textContent = "皮肤常驻";
     headingTitle.style.cssText = "font-weight:750;letter-spacing:.01em;color:#17344f;";
     const headingState = document.createElement("div");
+    headingState.id = data.menuId + "-persistence-state";
     headingState.dataset.heigeRole = "persistence-state";
     headingState.style.cssText = "margin-top:1px;font-size:11px;color:rgba(23,52,79,.68);";
     headingCopy.append(headingTitle, headingState);
@@ -796,7 +798,7 @@ export function buildSkinMenuScript({
     persistenceSwitch.dataset.heigeRole = "persistence-switch";
     persistenceSwitch.setAttribute("role", "switch");
     persistenceSwitch.setAttribute("tabindex", "0");
-    persistenceSwitch.setAttribute("aria-label", "皮肤常驻");
+    persistenceSwitch.setAttribute("aria-labelledby", headingTitle.id);
     persistenceSwitch.style.cssText = "position:relative;flex:none;width:42px;height:24px;padding:0;border:1px solid rgba(23,52,79,.2);border-radius:999px;cursor:pointer;-webkit-app-region:no-drag;";
     const switchKnob = document.createElement("span");
     switchKnob.setAttribute("aria-hidden", "true");
@@ -805,17 +807,23 @@ export function buildSkinMenuScript({
     heading.append(headingCopy, persistenceSwitch);
 
     const helper = document.createElement("p");
+    helper.id = data.menuId + "-persistence-helper";
     helper.dataset.heigeRole = "persistence-helper";
     helper.textContent = "关闭后本次继续使用；下次启动恢复原生界面。\\n重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。";
     helper.style.cssText = "margin:8px 0 0;white-space:pre-line;font-size:11px;line-height:1.55;color:rgba(23,52,79,.74);";
+    persistenceSwitch.setAttribute("aria-describedby", headingState.id + " " + helper.id);
 
     const confirmation = document.createElement("div");
     confirmation.dataset.heigeRole = "persistence-confirmation";
+    confirmation.setAttribute("role", "alertdialog");
+    confirmation.setAttribute("aria-describedby", helper.id);
     confirmation.hidden = true;
     confirmation.style.cssText = "margin-top:9px;padding:9px;border:1px solid rgba(187,72,50,.24);border-radius:8px;background:rgba(255,244,240,.92);";
     const confirmationText = document.createElement("div");
+    confirmationText.id = data.menuId + "-persistence-confirmation-text";
     confirmationText.textContent = "确认关闭常驻？本次会话仍继续使用皮肤，下次启动将恢复原生界面。";
     confirmationText.style.cssText = "font-size:11px;line-height:1.55;color:#713a31;";
+    confirmation.setAttribute("aria-labelledby", confirmationText.id);
     const confirmationActions = document.createElement("div");
     confirmationActions.style.cssText = "display:flex;justify-content:flex-end;gap:7px;margin-top:8px;";
     const cancel = document.createElement("button");
@@ -871,7 +879,7 @@ export function buildSkinMenuScript({
       return detail.includes("控制器不可用") ? detail : "控制器不可用：" + detail;
     };
     const isRevision = (value) => Number.isSafeInteger(value) && value >= 0;
-    const requestPersistence = async (target) => {
+    const requestPersistence = async (target, restoreFocus = false) => {
       assertCurrent();
       if (pending || target === persistenceEnabled) return;
       const previousEnabled = persistenceEnabled;
@@ -940,6 +948,7 @@ export function buildSkinMenuScript({
         if (!isCurrent()) return;
         pending = false;
         paintPersistence();
+        if (restoreFocus) persistenceSwitch.focus();
       }
     };
     applyRemotePersistence = (value) => {
@@ -973,7 +982,13 @@ export function buildSkinMenuScript({
       confirmation.hidden = true;
       persistenceSwitch.focus();
     });
-    listen(confirm, "click", () => { void requestPersistence(false); });
+    listen(confirmation, "keydown", (event) => {
+      if (event.key !== "Escape" || confirmation.hidden || pending) return;
+      event.preventDefault();
+      confirmation.hidden = true;
+      persistenceSwitch.focus();
+    });
+    listen(confirm, "click", () => { void requestPersistence(false, true); });
     getPersistenceState = () => { assertCurrent(); return { persistenceEnabled, revision: controlRevision, pending }; };
     paintPersistence();
   }
