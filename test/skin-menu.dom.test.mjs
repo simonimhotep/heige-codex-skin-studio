@@ -155,7 +155,28 @@ async function upload(page, { bytes, name = "upload.png", type = "image/png", si
   for (let index = 0; index < 24; index += 1) await page.flush();
 }
 
-test("switch exposes accessible state and permanent re-enable guidance", async (t) => {
+function rgb(value) {
+  const hex = /^#([0-9a-f]{6})$/i.exec(value);
+  if (hex) return [0, 2, 4].map((offset) => Number.parseInt(hex[1].slice(offset, offset + 2), 16));
+  const functional = /^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i.exec(value);
+  if (functional) return functional.slice(1).map(Number);
+  throw new Error(`unsupported test color: ${value}`);
+}
+
+function contrastRatio(left, right) {
+  const luminance = (value) => rgb(value)
+    .map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    })
+    .reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+  const values = [luminance(left), luminance(right)].sort((a, b) => b - a);
+  return (values[0] + 0.05) / (values[1] + 0.05);
+}
+
+test("switch exposes programmatic state and permanent re-enable guidance", async (t) => {
   const page = await menuWindow({ persistenceEnabled: true, revision: 7 });
   t.after(() => page.close());
   assert.equal(page.switch.getAttribute("role"), "switch");
@@ -165,16 +186,19 @@ test("switch exposes accessible state and permanent re-enable guidance", async (
   assert.match(page.switch.getAttribute("aria-describedby") ?? "", /persistence-state/);
   assert.match(page.switch.getAttribute("aria-describedby") ?? "", /persistence-helper/);
   assert.match(page.document.body.textContent, /关闭后本次继续使用；下次启动恢复原生界面/);
+  assert.match(page.document.body.textContent, /恢复本次皮肤/);
   assert.match(page.document.body.textContent, /HeiGe 皮肤启动器/);
   assert.match(page.document.body.textContent, /启用 HeiGe 皮肤/);
+  assert.match(page.document.body.textContent, /下次仍常驻：重新打开此开关/);
 });
 
-test("off confirmation is an announced dialog with Escape and focus restoration", async (t) => {
+test("inline off confirmation is labelled and restores focus before every local hide", async (t) => {
   const pending = deferredResponse();
   const page = await menuWindow({ fetch: () => pending.promise });
   t.after(() => page.close());
+  page.trigger.click();
   await page.clickPersistenceSwitch();
-  assert.equal(page.confirmation.getAttribute("role"), "alertdialog");
+  assert.equal(page.confirmation.getAttribute("role"), "group");
   assert.match(page.confirmation.getAttribute("aria-labelledby") ?? "", /persistence-confirmation-text/);
   assert.match(page.confirmation.getAttribute("aria-describedby") ?? "", /persistence-helper/);
   assert.equal(page.document.activeElement?.dataset.heigeRole, "persistence-cancel");
@@ -185,13 +209,100 @@ test("off confirmation is an announced dialog with Escape and focus restoration"
   }));
   await page.flush();
   assert.equal(page.confirmation.hidden, true);
+  assert.equal(page.trigger.getAttribute("aria-expanded"), "true");
   assert.equal(page.document.activeElement, page.switch);
 
   await page.clickPersistenceSwitch();
+  page.confirm.focus();
   await page.clickConfirmOff();
+  assert.equal(page.confirmation.hidden, false);
+  assert.equal(page.confirmation.getAttribute("aria-busy"), "true");
+  assert.equal(page.document.activeElement, page.confirm);
   pending.resolve(okResponse({ persistenceEnabled: false, revision: 8 }));
   await page.flush();
+  assert.equal(page.confirmation.hidden, true);
   assert.equal(page.document.activeElement, page.switch);
+  assert.match(page.alert.textContent, /启动器.*只恢复本次/s);
+  assert.match(page.alert.textContent, /下次仍常驻.*重新打开此开关/s);
+});
+
+test("menu actions use native buttons and expose selected theme state", async (t) => {
+  const page = await menuWindow({
+    entries: [
+      { id: "miku-488137", name: "Miku 488137", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+  });
+  t.after(() => page.close());
+  const themeButtons = [...page.document.querySelectorAll('[data-heige-role="theme-option"]')];
+  assert.equal(themeButtons.length, 2);
+  assert.equal(themeButtons.every((item) => item.tagName === "BUTTON" && item.type === "button"), true);
+  assert.equal(themeButtons[0].getAttribute("aria-pressed"), "true");
+  assert.equal(themeButtons[1].getAttribute("aria-pressed"), "false");
+  assert.equal(themeButtons[0].querySelector("span")?.getAttribute("aria-hidden"), "true");
+  for (const role of ["upload-trigger", "native-option", "hide-trigger"]) {
+    const action = page.document.querySelector(`[data-heige-role="${role}"]`);
+    assert.equal(action?.tagName, "BUTTON", `${role} should be a native button`);
+    assert.equal(action?.type, "button");
+  }
+  themeButtons[1].click();
+  assert.equal(page.themeId, "night-city");
+  assert.equal(themeButtons[1].getAttribute("aria-pressed"), "true");
+  assert.equal(page.document.activeElement, page.trigger);
+});
+
+test("menu disclosure publishes its state and Escape closes back to the trigger", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  assert.equal(page.trigger.getAttribute("aria-label"), "打开皮肤菜单");
+  assert.equal(page.trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(page.trigger.getAttribute("aria-controls"), page.panel.id);
+  page.trigger.click();
+  assert.equal(page.trigger.getAttribute("aria-expanded"), "true");
+  assert.equal(page.panel.style.display, "block");
+  const firstTheme = page.document.querySelector('[data-heige-role="theme-option"]');
+  firstTheme.focus();
+  firstTheme.dispatchEvent(new page.window.KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+  }));
+  assert.equal(page.trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(page.panel.style.display, "none");
+  assert.equal(page.document.activeElement, page.trigger);
+});
+
+test("minimized menu keeps a twenty-four-pixel target around its ten-pixel dot", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  await page.hideMenu();
+  const dot = page.document.querySelector('[data-heige-role="menu-trigger-glyph"]');
+  assert.ok(Number.parseFloat(page.trigger.style.width) >= 24);
+  assert.ok(Number.parseFloat(page.trigger.style.height) >= 24);
+  assert.equal(dot?.style.width, "10px");
+  assert.equal(dot?.style.height, "10px");
+  assert.equal(page.trigger.getAttribute("aria-label"), "显示皮肤菜单");
+});
+
+test("menu panel is vertically scrollable and keeps focused actions in view", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  assert.match(page.panel.style.maxHeight, /100vh.*58px/);
+  assert.equal(page.panel.style.overflowY, "auto");
+  const firstTheme = page.document.querySelector('[data-heige-role="theme-option"]');
+  let scrollOptions = null;
+  firstTheme.scrollIntoView = (options) => { scrollOptions = options; };
+  firstTheme.dispatchEvent(new page.window.FocusEvent("focusin", { bubbles: true }));
+  assert.equal(scrollOptions?.block, "nearest");
+});
+
+test("switch track and border colors meet three-to-one non-text contrast", async (t) => {
+  for (const persistenceEnabled of [true, false]) {
+    const page = await menuWindow({ persistenceEnabled });
+    t.after(() => page.close());
+    assert.ok(contrastRatio(page.switch.style.backgroundColor, "#ffffff") >= 3);
+    assert.ok(contrastRatio(page.switch.style.borderColor, "#ffffff") >= 3);
+  }
 });
 
 test("off is painted only after the controller ACK", async (t) => {
@@ -268,7 +379,7 @@ test("malformed and mismatched ACKs never change the painted state", async (t) =
   }
 });
 
-test("Enter and Space operate the switch while repeated pending input is ignored", async (t) => {
+test("scripted Enter and Space keydown operate the switch while pending input is ignored", async (t) => {
   const pending = deferredResponse();
   let calls = 0;
   const page = await menuWindow({
@@ -495,6 +606,25 @@ test("validated upload scales within both canvas budgets and persists", async (t
   assert.deepEqual(drawCalls[0], { width: 2000, height: 500 });
   assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
   assert.match(page.window.localStorage.getItem("heigeCodexCustomTheme"), /data:image\/webp/);
+  const custom = page.document.querySelector('[data-heige-theme-id="custom-upload"]');
+  const remove = page.document.querySelector('[data-heige-role="custom-delete"]');
+  assert.equal(custom?.tagName, "BUTTON");
+  assert.equal(custom?.getAttribute("aria-pressed"), "true");
+  assert.equal(remove?.tagName, "BUTTON");
+  assert.match(remove?.getAttribute("aria-label") ?? "", /删除自定义主题.*wide/i);
+});
+
+test("remote persistence changes close inline confirmation after restoring focus", async (t) => {
+  SharedBroadcastChannel.reset();
+  const left = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel });
+  const right = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel });
+  t.after(() => { left.close(); right.close(); SharedBroadcastChannel.reset(); });
+  await right.clickPersistenceSwitch();
+  assert.equal(right.document.activeElement, right.cancel);
+  await left.disablePersistence();
+  await right.flush();
+  assert.equal(right.confirmation.hidden, true);
+  assert.equal(right.document.activeElement?.dataset.heigeRole, "persistence-switch");
 });
 
 test("vertical boundary images keep the palette canvas below 48 pixels per side", async (t) => {

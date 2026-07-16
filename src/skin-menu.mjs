@@ -237,25 +237,56 @@ export function buildSkinMenuScript({
 
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = "\\u{1F3A8}";
+  button.setAttribute("aria-label", "打开皮肤菜单");
+  button.setAttribute("aria-expanded", "false");
   button.title = "HeiGe Codex Skin Studio";
   button.style.cssText = "display:block;margin:0 auto;width:30px;height:30px;border-radius:50%;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.82);backdrop-filter:blur(10px);box-shadow:0 2px 8px rgba(0,0,0,.14);cursor:pointer;font-size:15px;padding:0;-webkit-app-region:no-drag;";
+  const triggerGlyph = document.createElement("span");
+  triggerGlyph.dataset.heigeRole = "menu-trigger-glyph";
+  triggerGlyph.textContent = "\\u{1F3A8}";
+  triggerGlyph.setAttribute("aria-hidden", "true");
+  button.appendChild(triggerGlyph);
 
   const panel = document.createElement("div");
+  panel.id = data.menuId + "-panel";
   panel.dataset.heigeRole = "menu-panel";
-  panel.style.cssText = "display:none;margin-top:8px;width:330px;max-width:calc(100vw - 24px);padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
+  panel.style.cssText = "display:none;margin-top:8px;width:330px;max-width:calc(100vw - 24px);max-height:calc(100vh - 58px);overflow-y:auto;overscroll-behavior:contain;padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
+  button.setAttribute("aria-controls", panel.id);
+  let hidden = false;
+  const setPanelOpen = (open, { focusTrigger = false } = {}) => {
+    assertCurrent();
+    const next = open === true && !hidden;
+    if (!next && focusTrigger) button.focus();
+    panel.style.display = next ? "block" : "none";
+    button.setAttribute("aria-expanded", String(next));
+    button.setAttribute("aria-label", hidden ? "显示皮肤菜单" : next ? "关闭皮肤菜单" : "打开皮肤菜单");
+  };
+  listen(panel, "focusin", (event) => {
+    event.target?.scrollIntoView?.({ block: "nearest" });
+  });
+  listen(panel, "keydown", (event) => {
+    if (event.key !== "Escape" || panel.style.display === "none") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPanelOpen(false, { focusTrigger: true });
+  });
 
   const rows = new Map();
   const paint = (id) => {
     for (const [rowId, row] of rows) {
       row.style.background = rowId === id ? "rgba(36,201,215,.16)" : "transparent";
       row.style.fontWeight = rowId === id ? "700" : "500";
+      if (row.hasAttribute("aria-pressed")) row.setAttribute("aria-pressed", String(rowId === id));
     }
   };
-  const row = (label, dotColor, onPick, before) => {
-    const item = document.createElement("div");
-    item.style.cssText = "display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer;";
+  const row = (label, dotColor, onPick, before, { role = "menu-action", selectable = false } = {}) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.dataset.heigeRole = role;
+    if (selectable) item.setAttribute("aria-pressed", "false");
+    item.style.cssText = "display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer;font:inherit;text-align:left;";
     const dot = document.createElement("span");
+    dot.setAttribute("aria-hidden", "true");
     dot.style.cssText = "width:10px;height:10px;border-radius:50%;flex:none;background:" + dotColor + ";";
     const text = document.createElement("span");
     text.textContent = label;
@@ -295,7 +326,12 @@ export function buildSkinMenuScript({
   };
 
   for (const theme of data.themes) {
-    rows.set(theme.id, row(theme.name, theme.accent, () => { setTheme(theme.id); panel.style.display = "none"; }));
+    const themeRow = row(theme.name, theme.accent, () => {
+      setTheme(theme.id);
+      setPanelOpen(false, { focusTrigger: true });
+    }, null, { role: "theme-option", selectable: true });
+    themeRow.dataset.heigeThemeId = theme.id;
+    rows.set(theme.id, themeRow);
   }
 
   // ---- 自定义图片：本地选图 -> 压缩 -> 取色 -> 生成 CSS -> 持久化 ----
@@ -525,28 +561,46 @@ export function buildSkinMenuScript({
   };
 
   let customRow = null;
+  let customRowContainer = null;
+  let customDelete = null;
   const deleteCustom = () => {
     assertCurrent();
     try { localStorage.removeItem(data.storageKey); } catch {}
     currentCustom = null;
     if (document.documentElement.dataset.heigeCodexSkin === data.customId) clearTheme();
-    customRow?.remove();
+    customRowContainer?.remove();
     rows.delete(data.customId);
     customRow = null;
+    customRowContainer = null;
+    customDelete = null;
   };
   const ensureCustomRow = (theme) => {
-    if (customRow) { customRow.querySelector("span + span").textContent = theme.name; customRow.firstChild.style.background = theme.colors.accent; return; }
-    customRow = row(theme.name, theme.colors.accent, () => { applyCustomTheme(currentCustom ?? loadCustom() ?? theme); panel.style.display = "none"; }, uploadRow);
+    if (customRow) {
+      customRow.querySelector("span + span").textContent = theme.name;
+      customRow.firstChild.style.background = theme.colors.accent;
+      customDelete.setAttribute("aria-label", "删除自定义主题：" + theme.name);
+      return;
+    }
+    customRow = row(theme.name, theme.colors.accent, () => {
+      applyCustomTheme(currentCustom ?? loadCustom() ?? theme);
+      setPanelOpen(false, { focusTrigger: true });
+    }, uploadRow, { role: "theme-option", selectable: true });
+    customRow.dataset.heigeThemeId = data.customId;
     const text = customRow.querySelector("span + span");
     text.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-    const del = document.createElement("span");
-    del.textContent = "\\u00d7";
-    del.title = "\\u5220\\u9664\\u81ea\\u5b9a\\u4e49\\u4e3b\\u9898";
-    del.style.cssText = "flex:none;width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;color:rgba(0,0,0,.45);font-size:14px;";
-    listen(del, "mouseenter", () => { del.style.background = "rgba(220,60,60,.15)"; del.style.color = "#c03030"; });
-    listen(del, "mouseleave", () => { del.style.background = "transparent"; del.style.color = "rgba(0,0,0,.45)"; });
-    listen(del, "click", (event) => { event.stopPropagation(); deleteCustom(); });
-    customRow.appendChild(del);
+    customDelete = document.createElement("button");
+    customDelete.type = "button";
+    customDelete.dataset.heigeRole = "custom-delete";
+    customDelete.setAttribute("aria-label", "删除自定义主题：" + theme.name);
+    customDelete.textContent = "\\u00d7";
+    customDelete.style.cssText = "flex:none;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:#713a31;cursor:pointer;font:700 14px/24px system-ui;";
+    listen(customDelete, "mouseenter", () => { customDelete.style.background = "rgba(220,60,60,.15)"; customDelete.style.color = "#8f211d"; });
+    listen(customDelete, "mouseleave", () => { customDelete.style.background = "transparent"; customDelete.style.color = "#713a31"; });
+    listen(customDelete, "click", deleteCustom);
+    customRowContainer = document.createElement("div");
+    customRowContainer.style.cssText = "display:flex;align-items:center;gap:2px;";
+    panel.insertBefore(customRowContainer, customRow);
+    customRowContainer.append(customRow, customDelete);
     rows.set(data.customId, customRow);
   };
 
@@ -762,13 +816,17 @@ export function buildSkinMenuScript({
       .catch((error) => { if (isCurrent()) showUploadAlert(safeUploadError(error)); })
       .finally(() => { if (isCurrent()) setUploadPending(-1); });
     picker.value = "";
-    panel.style.display = "block";
+    setPanelOpen(true);
   });
 
-  const uploadRow = row("\\uff0b \\u81ea\\u5b9a\\u4e49\\u56fe\\u7247", "rgba(36,201,215,.9)", () => picker.click());
+  const uploadRow = row("\\uff0b \\u81ea\\u5b9a\\u4e49\\u56fe\\u7247", "rgba(36,201,215,.9)", () => picker.click(), null, { role: "upload-trigger" });
   uploadRow.style.borderTop = "1px solid rgba(0,0,0,.08)";
 
-  const native = row("\\u539f\\u751f\\u754c\\u9762", "rgba(0,0,0,.24)", () => { clearTheme(); panel.style.display = "none"; });
+  const native = row("\\u539f\\u751f\\u754c\\u9762", "rgba(0,0,0,.24)", () => {
+    clearTheme();
+    setPanelOpen(false, { focusTrigger: true });
+  }, null, { role: "native-option", selectable: true });
+  native.dataset.heigeThemeId = data.nativeSel;
   rows.set(null, native);
 
   // ---- 常驻开关：只显示控制器确认的真实状态，不使用 localStorage 伪造持久化 ----
@@ -799,7 +857,7 @@ export function buildSkinMenuScript({
     persistenceSwitch.setAttribute("role", "switch");
     persistenceSwitch.setAttribute("tabindex", "0");
     persistenceSwitch.setAttribute("aria-labelledby", headingTitle.id);
-    persistenceSwitch.style.cssText = "position:relative;flex:none;width:42px;height:24px;padding:0;border:1px solid rgba(23,52,79,.2);border-radius:999px;cursor:pointer;-webkit-app-region:no-drag;";
+    persistenceSwitch.style.cssText = "position:relative;flex:none;width:42px;height:24px;padding:0;border:1px solid #31526b;border-radius:999px;cursor:pointer;-webkit-app-region:no-drag;";
     const switchKnob = document.createElement("span");
     switchKnob.setAttribute("aria-hidden", "true");
     switchKnob.style.cssText = "position:absolute;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.24);";
@@ -809,14 +867,15 @@ export function buildSkinMenuScript({
     const helper = document.createElement("p");
     helper.id = data.menuId + "-persistence-helper";
     helper.dataset.heigeRole = "persistence-helper";
-    helper.textContent = "关闭后本次继续使用；下次启动恢复原生界面。\\n重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。";
+    helper.textContent = "关闭后本次继续使用；下次启动恢复原生界面。\\n恢复本次皮肤：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。\\n下次仍常驻：重新打开此开关。";
     helper.style.cssText = "margin:8px 0 0;white-space:pre-line;font-size:11px;line-height:1.55;color:rgba(23,52,79,.74);";
     persistenceSwitch.setAttribute("aria-describedby", headingState.id + " " + helper.id);
 
     const confirmation = document.createElement("div");
     confirmation.dataset.heigeRole = "persistence-confirmation";
-    confirmation.setAttribute("role", "alertdialog");
+    confirmation.setAttribute("role", "group");
     confirmation.setAttribute("aria-describedby", helper.id);
+    confirmation.setAttribute("aria-busy", "false");
     confirmation.hidden = true;
     confirmation.style.cssText = "margin-top:9px;padding:9px;border:1px solid rgba(187,72,50,.24);border-radius:8px;background:rgba(255,244,240,.92);";
     const confirmationText = document.createElement("div");
@@ -853,6 +912,20 @@ export function buildSkinMenuScript({
     let controlRevision = data.control.revision;
     let pending = false;
 
+    const closeConfirmation = ({ restoreFocus = false } = {}) => {
+      assertCurrent();
+      if (confirmation.hidden) return false;
+      if (restoreFocus) {
+        if (pending) button.focus();
+        else persistenceSwitch.focus();
+      }
+      confirmation.hidden = true;
+      confirmation.setAttribute("aria-busy", "false");
+      cancel.removeAttribute("aria-disabled");
+      confirm.removeAttribute("aria-disabled");
+      return true;
+    };
+
     const showAlert = (message, kind = "error") => {
       assertCurrent();
       alert.textContent = message;
@@ -866,7 +939,7 @@ export function buildSkinMenuScript({
       persistenceSwitch.setAttribute("aria-checked", String(persistenceEnabled));
       persistenceSwitch.setAttribute("aria-busy", String(pending));
       persistenceSwitch.disabled = pending;
-      persistenceSwitch.style.background = persistenceEnabled ? "#1aaab8" : "rgba(23,52,79,.18)";
+      persistenceSwitch.style.background = persistenceEnabled ? "#087d8a" : "#66788a";
       persistenceSwitch.style.opacity = pending ? ".64" : "1";
       switchKnob.style.left = persistenceEnabled ? "21px" : "4px";
       headingState.textContent = pending ? "正在等待后台确认…" : persistenceEnabled ? "已开启，下次启动继续使用" : "已关闭，仅保留本次会话";
@@ -885,7 +958,11 @@ export function buildSkinMenuScript({
       const previousEnabled = persistenceEnabled;
       const requestRevision = controlRevision;
       pending = true;
-      confirmation.hidden = true;
+      if (!target && !confirmation.hidden) {
+        confirmation.setAttribute("aria-busy", "true");
+        cancel.setAttribute("aria-disabled", "true");
+        confirm.setAttribute("aria-disabled", "true");
+      }
       hideAlert();
       paintPersistence();
       const abortController = childController();
@@ -923,7 +1000,7 @@ export function buildSkinMenuScript({
           publish("persistence", { enabled: persistenceEnabled, revision: controlRevision });
           showAlert(target
             ? "常驻已开启，下次启动继续使用皮肤。"
-            : "常驻已关闭。本次继续使用，下次启动恢复原生界面。\\n重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。",
+            : "常驻已关闭。本次继续使用，下次启动恢复原生界面。\\n「HeiGe 皮肤启动器」或「启用 HeiGe 皮肤」只恢复本次皮肤。\\n下次仍常驻：重新打开此开关。",
           "success");
         } else {
           if (
@@ -948,15 +1025,15 @@ export function buildSkinMenuScript({
         if (!isCurrent()) return;
         pending = false;
         paintPersistence();
-        if (restoreFocus) persistenceSwitch.focus();
+        if (restoreFocus) closeConfirmation({ restoreFocus: true });
       }
     };
     applyRemotePersistence = (value) => {
       assertCurrent();
       if (value.revision <= controlRevision) return false;
+      closeConfirmation({ restoreFocus: !confirmation.hidden });
       persistenceEnabled = value.enabled;
       controlRevision = value.revision;
-      confirmation.hidden = true;
       hideAlert();
       paintPersistence();
       return true;
@@ -967,6 +1044,7 @@ export function buildSkinMenuScript({
       if (persistenceEnabled) {
         hideAlert();
         confirmation.hidden = false;
+        confirmation.setAttribute("aria-busy", "false");
         cancel.focus();
       } else {
         void requestPersistence(true);
@@ -979,14 +1057,14 @@ export function buildSkinMenuScript({
       activatePersistenceSwitch();
     });
     listen(cancel, "click", () => {
-      confirmation.hidden = true;
-      persistenceSwitch.focus();
+      if (pending) return;
+      closeConfirmation({ restoreFocus: true });
     });
     listen(confirmation, "keydown", (event) => {
       if (event.key !== "Escape" || confirmation.hidden || pending) return;
       event.preventDefault();
-      confirmation.hidden = true;
-      persistenceSwitch.focus();
+      event.stopPropagation();
+      closeConfirmation({ restoreFocus: true });
     });
     listen(confirm, "click", () => { void requestPersistence(false, true); });
     getPersistenceState = () => { assertCurrent(); return { persistenceEnabled, revision: controlRevision, pending }; };
@@ -997,22 +1075,26 @@ export function buildSkinMenuScript({
   const readHidden = () => { assertCurrent(); try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
   const writeHidden = (value) => { assertCurrent(); try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
   const FULL_BUTTON_CSS = button.style.cssText;
-  const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:10px;height:10px;border-radius:50%;border:none;background:rgba(120,130,140,.55);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer;font-size:0;padding:0;opacity:.35;-webkit-app-region:no-drag;";
-  let hidden = false;
+  const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:24px;height:24px;border:0;background:transparent;box-shadow:none;cursor:pointer;font-size:0;padding:0;-webkit-app-region:no-drag;";
   const setHidden = (value, persist = true, broadcast = true) => {
     assertCurrent();
     if (typeof value !== "boolean") return;
+    const panelHadFocus = panel.contains(document.activeElement);
+    if (value) setPanelOpen(false, { focusTrigger: panelHadFocus });
     hidden = value;
     button.style.cssText = value ? MINI_BUTTON_CSS : FULL_BUTTON_CSS;
-    button.textContent = value ? "" : "\\u{1F3A8}";
+    triggerGlyph.textContent = value ? "" : "\\u{1F3A8}";
+    triggerGlyph.style.cssText = value
+      ? "display:block;margin:auto;width:10px;height:10px;border-radius:50%;background:#66788a;box-shadow:0 1px 4px rgba(0,0,0,.18);opacity:.55;"
+      : "";
     button.title = value ? "\\u663e\\u793a\\u6362\\u80a4\\u6309\\u94ae" : "HeiGe Codex Skin Studio";
-    if (value) panel.style.display = "none";
+    setPanelOpen(false);
     if (persist) writeHidden(value);
     if (broadcast) publish("menu-hidden", value);
   };
-  listen(button, "mouseenter", () => { if (hidden) { button.style.opacity = ".9"; button.style.transform = "scale(1.5)"; } });
-  listen(button, "mouseleave", () => { if (hidden) { button.style.opacity = ".35"; button.style.transform = "scale(1)"; } });
-  const hideRow = row("\\u9690\\u85cf\\u6b64\\u6309\\u94ae", "rgba(0,0,0,.18)", () => setHidden(true));
+  listen(button, "mouseenter", () => { if (hidden) { triggerGlyph.style.opacity = ".9"; triggerGlyph.style.transform = "scale(1.15)"; } });
+  listen(button, "mouseleave", () => { if (hidden) { triggerGlyph.style.opacity = ".55"; triggerGlyph.style.transform = "scale(1)"; } });
+  const hideRow = row("\\u9690\\u85cf\\u6b64\\u6309\\u94ae", "rgba(0,0,0,.18)", () => setHidden(true), null, { role: "hide-trigger" });
   hideRow.style.borderTop = "1px solid rgba(0,0,0,.08)";
 
   const saved = loadCustom();
@@ -1104,7 +1186,7 @@ export function buildSkinMenuScript({
   listen(button, "click", () => {
     assertCurrent();
     if (hidden) { setHidden(false); return; }
-    panel.style.display = panel.style.display === "none" ? "block" : "none";
+    setPanelOpen(panel.style.display === "none");
   });
 
   root.append(button, panel, picker);

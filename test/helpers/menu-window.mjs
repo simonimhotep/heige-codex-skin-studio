@@ -87,8 +87,12 @@ export async function menuWindow({
   const page = {
     window,
     document: window.document,
+    get trigger() { return window.document.querySelector("#heige-codex-skin-menu > button"); },
+    get panel() { return query("menu-panel"); },
     get switch() { return query("persistence-switch"); },
     get confirmation() { return query("persistence-confirmation"); },
+    get cancel() { return query("persistence-cancel"); },
+    get confirm() { return query("persistence-confirm"); },
     get alert() { return query("persistence-alert"); },
     get themeId() { return window.document.documentElement.dataset.heigeCodexSkin ?? null; },
     get hidden() {
