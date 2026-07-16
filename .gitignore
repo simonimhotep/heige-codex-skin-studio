@@ -1,5 +1,6 @@
 .DS_Store
 pet/
-output/*
-!output/codex-miku-theme.skill
 .worktrees/
+.staging/
+output/*
+!output/heige-codex-skin-studio.skill

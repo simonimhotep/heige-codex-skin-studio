@@ -1,11 +1,11 @@
 {
-  "name": "codex-miku-theme",
-  "version": "5.0.0",
+  "name": "heige-codex-skin-studio",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "assets": "./scripts/build-assets.command",
     "test": "node --test",
-    "check": "node src/theme-patch.mjs check"
+    "doctor": "node src/cli.mjs doctor",
+    "status": "node src/cli.mjs status"
   }
 }
