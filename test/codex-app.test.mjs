@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bundledNodeCandidates, codexAppCandidates, discoverCodex } from "../src/codex-app.mjs";
+import { bundledNodeCandidates, classifyInjection, codexAppCandidates, discoverCodex, runtimeDiagnostics } from "../src/codex-app.mjs";
 import { resolveStudioPaths } from "../src/constants.mjs";
 
 const winEnv = { LOCALAPPDATA: "C:\\Users\\heige\\AppData\\Local", ProgramFiles: "C:\\Program Files", APPDATA: "C:\\Users\\heige\\AppData\\Roaming" };
@@ -51,4 +51,58 @@ test("state paths follow the platform convention", () => {
   assert.ok(win.stateRoot.includes("Roaming"));
   const mac = resolveStudioPaths({ home: "/Users/heige", platform: "darwin", env: {} });
   assert.ok(mac.stateRoot.includes("Application Support"));
+});
+
+test("runtime diagnostics reads version, process flag, and port state", async () => {
+  const exec = async (bin, args) => {
+    if (bin === "/usr/bin/defaults") return { stdout: "151.0.8000.1\n" };
+    if (bin === "/bin/ps") {
+      return {
+        stdout: [
+          "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT --remote-debugging-address=127.0.0.1 --remote-debugging-port=9341",
+          "/Applications/ChatGPT.app/Contents/Frameworks/helper --type=renderer",
+        ].join("\n"),
+      };
+    }
+    throw new Error(`unexpected exec: ${bin} ${args}`);
+  };
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ Browser: "Chrome/150.0" }) });
+
+  const diag = await runtimeDiagnostics({ platform: "darwin", exec, fetchImpl });
+  assert.equal(diag.appVersion, "151.0.8000.1");
+  assert.equal(diag.processRunning, true);
+  assert.equal(diag.processHasDebugFlag, true);
+  assert.equal(diag.portOpen, true);
+  assert.equal(diag.portBrowser, "Chrome/150.0");
+  assert.match(classifyInjection(diag), /^ok/);
+});
+
+test("runtime diagnostics classifies the three failure shapes", async () => {
+  const base = { appVersion: null, portOpen: false, portBrowser: null };
+  assert.match(
+    classifyInjection({ ...base, processRunning: true, processHasDebugFlag: true }),
+    /^flag-present-port-closed/,
+  );
+  assert.match(
+    classifyInjection({ ...base, processRunning: true, processHasDebugFlag: false }),
+    /^running-no-flag/,
+  );
+  assert.match(
+    classifyInjection({ ...base, processRunning: false, processHasDebugFlag: false }),
+    /^not-running/,
+  );
+});
+
+test("runtime diagnostics degrades honestly when probes fail", async () => {
+  const exec = async () => { throw new Error("denied"); };
+  const fetchImpl = async () => { throw new Error("refused"); };
+
+  const diag = await runtimeDiagnostics({ platform: "darwin", exec, fetchImpl });
+  assert.deepEqual(diag, {
+    appVersion: null,
+    processRunning: false,
+    processHasDebugFlag: false,
+    portOpen: false,
+    portBrowser: null,
+  });
 });

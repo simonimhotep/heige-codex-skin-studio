@@ -2,7 +2,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { discoverCodex } from "./codex-app.mjs";
+import { classifyInjection, discoverCodex, runtimeDiagnostics } from "./codex-app.mjs";
 import { DEFAULT_CDP_PORT, DEFAULT_THEME_ID, resolveStudioPaths } from "./constants.mjs";
 import { applySkin, removeSkin, skinStatus } from "./injector.mjs";
 import { loadTheme } from "./theme-schema.mjs";
@@ -87,7 +87,16 @@ export async function runCli(argv, overrides = {}) {
   if (command === "status") return deps.skinStatus({ port: portFrom(args.port) });
   if (command === "doctor") {
     const discovery = await (deps.discoverCodex ?? discoverCodex)();
-    return { ...discovery, cdpPort: DEFAULT_CDP_PORT };
+    const runtime = await (deps.runtimeDiagnostics ?? runtimeDiagnostics)({
+      appPath: discovery.app,
+      port: portFrom(args.port),
+    });
+    return {
+      ...discovery,
+      cdpPort: portFrom(args.port),
+      ...runtime,
+      diagnosis: classifyInjection(runtime),
+    };
   }
   throw new Error(`未知命令：${command}`);
 }
