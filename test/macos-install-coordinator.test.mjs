@@ -119,7 +119,10 @@ function fixture({
       mark("tree-publish");
       crashAfter("tree-publish");
     },
-    rollbackTree: async () => mark("tree-rollback"),
+    rollbackTree: async () => {
+      mark("tree-rollback");
+      crashAfter("tree-rollback");
+    },
     finalizeTree: async () => mark("tree-finalize"),
     prepareLauncher: async () => {
       mark("launcher-prepare");
@@ -130,7 +133,10 @@ function fixture({
       mark("launcher-publish");
       crashAfter("launcher-publish");
     },
-    rollbackLauncher: async () => mark("launcher-rollback"),
+    rollbackLauncher: async () => {
+      mark("launcher-rollback");
+      crashAfter("launcher-rollback");
+    },
     finalizeLauncher: async () => mark("launcher-finalize"),
     prepareState: async (input) => {
       mark("state-prepare", input);
@@ -141,7 +147,10 @@ function fixture({
       mark("state-publish");
       crashAfter("state-publish");
     },
-    rollbackState: async () => mark("state-rollback"),
+    rollbackState: async () => {
+      mark("state-rollback");
+      crashAfter("state-rollback");
+    },
     finalizeState: async () => mark("state-finalize"),
     createFreezeDescriptor: async () => (mark("freeze-intent"), freeze),
     prepareFreeze: async () => {
@@ -149,8 +158,18 @@ function fixture({
       crashAfter("freeze-prepare");
       return { servicesFound: true, transaction: freeze };
     },
-    stopFreezeForRollback: async () => mark("freeze-stop"),
-    rollbackFreeze: async () => mark("freeze-rollback"),
+    stopFreezeForRollback: async () => {
+      mark("freeze-stop");
+      crashAfter("freeze-stop");
+    },
+    rollbackFreeze: async () => {
+      mark("freeze-rollback");
+      crashAfter("freeze-rollback");
+    },
+    finalizeFreezeRollback: async () => {
+      mark("freeze-rollback-finalize");
+      crashAfter("freeze-rollback-finalize");
+    },
     finalizeFreeze: async (_descriptor, options) => mark("freeze-finalize", options),
     awaitExactReady: async (input) => {
       mark("ready", input.outerTransaction);
@@ -220,6 +239,93 @@ test("readiness failure durably decides rollback and reverses state launcher tre
   assert.deepEqual(fx.events.filter((entry) => ordered.includes(entry)), ordered);
   assert.equal(fx.journal, null);
 });
+
+for (const prestate of ["controller-only", "both", "none"]) {
+  test(`rollback recovery preserves the exact ${prestate} freeze prestate after outer clear crashes`, async () => {
+    const fx = fixture({
+      persistenceEnabled: true,
+      crashAt: "journal-clear",
+      ready: async () => {
+        current.controller = { bytes: "new", loaded: true, mode: 0o600 };
+        throw new Error("ACK timeout after controller activation");
+      },
+    });
+    const expected = {
+      controller: prestate === "none"
+        ? null
+        : { bytes: "old-controller", loaded: true, mode: 0o640 },
+      watchdog: prestate === "both"
+        ? { bytes: "old-watchdog", loaded: true, mode: 0o600 }
+        : null,
+    };
+    const current = structuredClone(expected);
+    let freezeJournal = null;
+
+    fx.deps.prepareFreeze = async () => {
+      freezeJournal = prestate === "none" ? null : structuredClone(expected);
+      current.controller = null;
+      current.watchdog = null;
+      return {
+        servicesFound: prestate !== "none",
+        transaction: prestate === "none"
+          ? null
+          : { transactionId: "123e4567-e89b-42d3-a456-426614174000", operation: "freeze-stable-services" },
+      };
+    };
+    fx.deps.stopFreezeForRollback = async () => {
+      current.controller = null;
+      if (freezeJournal !== null) current.watchdog = null;
+    };
+    fx.deps.rollbackFreeze = async () => {
+      if (freezeJournal === null) return { rolledBack: false };
+      current.controller = structuredClone(freezeJournal.controller);
+      current.watchdog = structuredClone(freezeJournal.watchdog);
+      return { rolledBack: true };
+    };
+    fx.deps.finalizeFreezeRollback = async () => {
+      freezeJournal = null;
+      return { finalized: true };
+    };
+
+    await assert.rejects(
+      coordinateMacosInstall(INPUT, fx.deps),
+      /macOS install failed and recovery did not finish/,
+    );
+    assert.deepEqual(current, expected, "first rollback restored the exact old prestate");
+
+    await recoverMacosInstallTransaction(fx.deps);
+
+    assert.equal(fx.journal, null);
+    assert.deepEqual(current, expected, "second recovery must not delete restored prestate");
+  });
+}
+
+for (const [faultKind, boundary] of [
+  ["actionCrashAt", "freeze-stop"],
+  ["actionCrashAt", "state-rollback"],
+  ["actionCrashAt", "launcher-rollback"],
+  ["actionCrashAt", "tree-rollback"],
+  ["actionCrashAt", "freeze-rollback"],
+  ["crashAt", "freeze-rollback-restored"],
+  ["actionCrashAt", "freeze-rollback-finalize"],
+  ["crashAt", "freeze-rollback-finalized"],
+  ["crashAt", "journal-clear"],
+]) {
+  test(`rollback recovery is idempotent after a hard crash at ${boundary}`, async () => {
+    const fx = fixture({
+      persistenceEnabled: true,
+      [faultKind]: boundary,
+      ready: async () => { throw new Error("ACK timeout"); },
+    });
+
+    await assert.rejects(coordinateMacosInstall(INPUT, fx.deps), /crash|failed/i);
+    assert.notEqual(fx.journal, null);
+
+    await recoverMacosInstallTransaction(fx.deps);
+
+    assert.equal(fx.journal, null);
+  });
+}
 
 test("hard crash after tree publication remains recoverable from the durable outer journal", async () => {
   const fx = fixture({

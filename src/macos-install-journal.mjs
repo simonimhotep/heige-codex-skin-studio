@@ -34,6 +34,7 @@ const PHASES = [
   "ready-acked",
   "commit-decided",
   "rollback-decided",
+  "freeze-rollback-restored",
 ];
 const PHASE_SET = new Set(PHASES);
 const FORWARD = new Map(PHASES.map((phase, index) => [phase, PHASES[index + 1] ?? null]));
@@ -146,7 +147,7 @@ function validateAck(value) {
 }
 
 function phaseAtLeast(phase, expected) {
-  if (phase === "rollback-decided") return false;
+  if (["rollback-decided", "freeze-rollback-restored"].includes(phase)) return false;
   return PHASES.indexOf(phase) >= PHASES.indexOf(expected);
 }
 
@@ -167,7 +168,10 @@ export function validateMacosInstallJournal(value, expectedPath = null) {
     typeof value.createdAt !== "string" ||
     !Number.isFinite(Date.parse(value.createdAt)) ||
     (value.decision === "commit") !== (value.phase === "commit-decided") ||
-    (value.decision === "rollback") !== (value.phase === "rollback-decided")
+    (value.decision === "rollback") !== [
+      "rollback-decided",
+      "freeze-rollback-restored",
+    ].includes(value.phase)
   ) throw new Error("macOS install journal identity is invalid");
   const sourceRoot = canonicalAbsolute(value.sourceRoot, "sourceRoot");
   const targetRoot = canonicalAbsolute(value.targetRoot, "targetRoot");

@@ -57,6 +57,7 @@ function assertDependencies(dependencies) {
     "createFreezeDescriptor",
     "createJournal",
     "finalizeFreeze",
+    "finalizeFreezeRollback",
     "finalizeLauncher",
     "finalizeState",
     "finalizeTree",
@@ -109,6 +110,13 @@ async function finishCommittedInstall(deps, journal) {
 }
 
 async function undoUndecidedInstall(deps, journal) {
+  if (journal.phase === "freeze-rollback-restored") {
+    await deps.finalizeFreezeRollback(journal.freezeParticipant);
+    await deps.checkpoint("freeze-rollback-finalized", journal);
+    await deps.clearJournal(journal);
+    return { recovered: true, decision: "rollback" };
+  }
+
   if (journal.activation === "controller" && journal.freezeParticipant !== null) {
     await deps.stopFreezeForRollback(journal.freezeParticipant);
   }
@@ -128,6 +136,10 @@ async function undoUndecidedInstall(deps, journal) {
   }
   if (journal.freezeParticipant !== null) {
     await deps.rollbackFreeze(journal.freezeParticipant);
+    journal = await update(deps, journal, { phase: "freeze-rollback-restored" });
+    await deps.checkpoint("freeze-rollback-restored", journal);
+    await deps.finalizeFreezeRollback(journal.freezeParticipant);
+    await deps.checkpoint("freeze-rollback-finalized", journal);
   }
   await deps.clearJournal(journal);
   return { recovered: true, decision: "rollback" };
@@ -441,6 +453,7 @@ export async function productionMacosInstallDependencies({
       return launchAgent.stopStableServiceFreezeForRollback(descriptor);
     },
     rollbackFreeze: launchAgent.rollbackStableServiceFreeze,
+    finalizeFreezeRollback: launchAgent.finalizeStableServiceFreezeRollback,
     finalizeFreeze: (descriptor, options) => launchAgent.finalizeStableServiceFreeze(
       descriptor,
       options,

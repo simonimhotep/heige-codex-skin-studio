@@ -1508,7 +1508,7 @@ async function readMigrationJournal(options, journalPath, identity) {
   return { path: journalPath, journal, snapshot };
 }
 
-async function readOuterTransactionDecision(options, outerTransaction, participant = null) {
+async function readOuterTransactionDocument(options, outerTransaction, participant = null) {
   let snapshot;
   try {
     snapshot = await snapshotFile(options.fs, outerTransaction.journalPath, {
@@ -1516,7 +1516,7 @@ async function readOuterTransactionDecision(options, outerTransaction, participa
       maxBytes: OUTER_JOURNAL_MAX_BYTES,
     });
   } catch (error) {
-    if (error?.code === "ENOENT") return "missing";
+    if (error?.code === "ENOENT") return null;
     throw error;
   }
   if (snapshot.mode !== 0o600) {
@@ -1543,7 +1543,12 @@ async function readOuterTransactionDecision(options, outerTransaction, participa
     throw migrationJournalError("outer transaction journal schema is invalid", cause);
   }
   await assertSnapshotCurrent(options.fs, outerTransaction.journalPath, snapshot);
-  return document.decision;
+  return document;
+}
+
+async function readOuterTransactionDecision(options, outerTransaction, participant = null) {
+  const document = await readOuterTransactionDocument(options, outerTransaction, participant);
+  return document === null ? "missing" : document.decision;
 }
 
 function snapshotMatchesBytes(snapshot, bytes, mode) {
@@ -2642,8 +2647,26 @@ export async function rollbackStableServiceFreeze(transaction, input = {}) {
       throw new Error(`stable service ${service.label} prestate was not restored`);
     }
   }
-  await removeMigrationJournal(context.options, journalTransaction);
   return { rolledBack: true };
+}
+
+export async function finalizeStableServiceFreezeRollback(transaction, input = {}) {
+  const { descriptor, context, journalTransaction } = await reconstructFreeze(transaction, input);
+  const outer = await readOuterTransactionDocument(context.options, {
+    transactionId: descriptor.transactionId,
+    journalPath: descriptor.coordinatorJournalPath,
+  }, descriptor);
+  if (
+    outer === null ||
+    outer.decision !== "rollback" ||
+    outer.phase !== "freeze-rollback-restored"
+  ) {
+    throw new Error("stable service freeze rollback cleanup requires durable outer restoration");
+  }
+  if (journalTransaction !== null) {
+    await removeMigrationJournal(context.options, journalTransaction);
+  }
+  return { finalized: true };
 }
 
 export async function stopStableServiceFreezeForRollback(transaction, input = {}) {

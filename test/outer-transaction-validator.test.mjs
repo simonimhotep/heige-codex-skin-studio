@@ -69,6 +69,22 @@ test("outer decision validator rejects a commit paired with a nonterminal phase"
   );
 });
 
+test("outer decision validator accepts the durable freeze rollback restoration phase", () => {
+  const { document, freezeParticipant } = fixture();
+  const rollback = {
+    ...document,
+    decision: "rollback",
+    phase: "freeze-rollback-restored",
+  };
+  assert.equal(
+    validateKnownOuterTransactionDocument(rollback, {
+      transactionId: document.transactionId,
+      participant: freezeParticipant,
+    }).phase,
+    "freeze-rollback-restored",
+  );
+});
+
 test("outer decision validator rejects a descriptor that differs by one canonical path", () => {
   const { document, freezeParticipant } = fixture();
   assert.throws(

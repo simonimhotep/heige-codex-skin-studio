@@ -37,6 +37,7 @@ const SHAPES = Object.freeze({
       "freeze-intent", "services-frozen", "tree-published", "launcher-published",
       "state-published", "activation-planned", "activation-skipped",
       "service-prepared", "ready-acked", "rollback-decided", "commit-decided",
+      "freeze-rollback-restored",
     ]),
   },
 });
@@ -76,7 +77,10 @@ export function validateKnownOuterTransactionDocument(document, {
     typeof document.createdAt !== "string" ||
     !Number.isFinite(Date.parse(document.createdAt)) ||
     (document.decision === "commit") !== (document.phase === "commit-decided") ||
-    (document.decision === "rollback") !== (document.phase === "rollback-decided")
+    (document.decision === "rollback") !== [
+      "rollback-decided",
+      "freeze-rollback-restored",
+    ].includes(document.phase)
   ) {
     throw new Error("outer transaction journal schema or terminal decision is invalid");
   }

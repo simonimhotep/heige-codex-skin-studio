@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import {
   createStableServiceFreezeDescriptor,
+  finalizeStableServiceFreezeRollback,
   finalizeStableServiceFreeze,
   finalizeLegacyWatchdogMigration,
   inspectLaunchAgent,
@@ -504,6 +505,17 @@ async function outerMacosInstallJournal(deps) {
         revision: document.revision + 1,
         decision: nextDecision,
         phase: `${nextDecision}-decided`,
+      };
+      await write();
+    },
+    async markFreezeRollbackRestored() {
+      document = {
+        ...document,
+        previousNonce: document.nonce,
+        nonce: randomUUID(),
+        revision: document.revision + 1,
+        decision: "rollback",
+        phase: "freeze-rollback-restored",
       };
       await write();
     },
@@ -1334,6 +1346,9 @@ test("stable service freeze stops both attributed jobs and rollback restores the
   assert.equal(deps.loaded.has(deps.oldLabel), true);
   assert.deepEqual(await readFile(deps.controllerPlistPath), controllerBytes);
   assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(await pathExists(join(deps.stateDir, "stable-service-freeze.json")), true);
+  await outer.markFreezeRollbackRestored();
+  await finalizeStableServiceFreezeRollback(descriptor, deps);
   assert.equal(await pathExists(join(deps.stateDir, "stable-service-freeze.json")), false);
 });
 
@@ -1528,6 +1543,9 @@ for (const prestate of ["both", "watchdog-only", "controller-only", "none"]) {
 
     await outer.decide("rollback");
     await rollbackStableServiceFreeze(descriptor, deps);
+    await outer.markFreezeRollbackRestored();
+    await finalizeStableServiceFreezeRollback(descriptor, deps);
+    await finalizeStableServiceFreezeRollback(descriptor, deps);
 
     assert.equal(await pathExists(deps.controllerPlistPath), controller !== null);
     assert.equal(await pathExists(deps.oldPlistPath), ["both", "watchdog-only"].includes(prestate));
