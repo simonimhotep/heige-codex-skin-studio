@@ -36,6 +36,7 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
     sentinels: CSS_SENTINELS,
     customId: "custom-upload",
     storageKey: "heigeCodexCustomTheme",
+    hiddenKey: "heigeCodexSkinMenuHidden",
   });
 
   return `(() => {
@@ -238,10 +239,30 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   const native = row("\\u539f\\u751f\\u754c\\u9762", "rgba(0,0,0,.24)", () => { clearTheme(); panel.style.display = "none"; });
   rows.set(null, native);
 
+  // ---- 隐藏按钮：收成半透明小圆点少占地方，点圆点恢复，状态跨重启保留 ----
+  const readHidden = () => { try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
+  const writeHidden = (value) => { try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
+  const FULL_BUTTON_CSS = button.style.cssText;
+  const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:10px;height:10px;border-radius:50%;border:none;background:rgba(120,130,140,.55);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer;font-size:0;padding:0;opacity:.35;transition:opacity .15s,transform .15s;-webkit-app-region:no-drag;";
+  let hidden = false;
+  const setHidden = (value, persist = true) => {
+    hidden = value;
+    button.style.cssText = value ? MINI_BUTTON_CSS : FULL_BUTTON_CSS;
+    button.textContent = value ? "" : "\\u{1F3A8}";
+    button.title = value ? "\\u663e\\u793a\\u6362\\u80a4\\u6309\\u94ae" : "HeiGe Codex Skin Studio";
+    if (value) panel.style.display = "none";
+    if (persist) writeHidden(value);
+  };
+  button.addEventListener("mouseenter", () => { if (hidden) { button.style.opacity = ".9"; button.style.transform = "scale(1.5)"; } });
+  button.addEventListener("mouseleave", () => { if (hidden) { button.style.opacity = ".35"; button.style.transform = "scale(1)"; } });
+  const hideRow = row("\\u9690\\u85cf\\u6b64\\u6309\\u94ae", "rgba(0,0,0,.18)", () => setHidden(true));
+  hideRow.style.borderTop = "1px solid rgba(0,0,0,.08)";
+
   const saved = loadCustom();
   if (saved) ensureCustomRow(saved);
 
   button.addEventListener("click", () => {
+    if (hidden) { setHidden(false); return; }
     panel.style.display = panel.style.display === "none" ? "block" : "none";
   });
 
@@ -249,9 +270,10 @@ export function buildSkinMenuScript({ entries, activeId, styleId, menuId, cssTem
   document.body.appendChild(root);
   if (data.activeId === null) clearTheme();
   else setTheme(data.activeId);
+  if (readHidden()) setHidden(true, false);
 
   // 供脚本化调用与测试：window.__heigeCodexSkin.importFromDataUrl(dataUrl, name)
-  window.__heigeCodexSkin = { importFromDataUrl, setTheme, clearTheme, deleteCustom };
+  window.__heigeCodexSkin = { importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden };
   return true;
 })()`;
 }

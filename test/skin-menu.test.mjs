@@ -67,6 +67,19 @@ test("centers the menu at the top clear of window controls on every platform", (
   assert.match(script, /-webkit-app-region:no-drag/, "controls must opt out of the titlebar drag region");
 });
 
+test("ships a hide control that collapses the button into a dot", () => {
+  const script = buildSkinMenuScript({
+    ...base,
+    activeId: "a",
+    entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
+  });
+
+  assert.match(script, /\\u9690\\u85cf\\u6b64\\u6309\\u94ae/, "hide row label must ship");
+  assert.match(script, /heigeCodexSkinMenuHidden/, "hidden state must persist via localStorage");
+  assert.match(script, /width:10px;height:10px/, "mini dot must stay tiny");
+  assert.match(script, /setHidden/, "hide must be scriptable");
+});
+
 test("rejects empty menus and unknown active themes", () => {
   assert.throws(() => buildSkinMenuScript({ ...base, activeId: null, entries: [] }));
   assert.throws(() =>
