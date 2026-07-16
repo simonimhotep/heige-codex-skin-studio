@@ -79,6 +79,19 @@ export async function runtimeDiagnostics({
     } catch {}
   }
 
+  if (platform === "win32") {
+    try {
+      const { stdout } = await exec("powershell", [
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='ChatGPT.exe' or Name='Codex.exe'\" | Select-Object -ExpandProperty CommandLine",
+      ]);
+      const lines = stdout.split(/\r?\n/).filter((line) => line.trim());
+      result.processRunning = lines.length > 0;
+      result.processHasDebugFlag = lines.some((line) => line.includes("--remote-debugging-port"));
+    } catch {}
+  }
+
   try {
     const response = await fetchImpl(`http://127.0.0.1:${port}/json/version`, {
       signal: AbortSignal.timeout(1500),

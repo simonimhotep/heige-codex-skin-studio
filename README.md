@@ -162,7 +162,7 @@ node src/cli.mjs doctor
 
 ### 支持 Windows 吗？
 
-支持。双击 `scripts\windows\install.bat` 安装，日常切换同样走顶部中间的 🎨 菜单（顶部中间位置天然避开系统窗口控制按钮和 Codex 自身菜单）。Windows 适配代码完整且有单测覆盖，目前等待实机验收，遇到问题欢迎开 Issue。
+支持。双击 `scripts\windows\install.bat` 安装，日常切换同样走顶部中间的 🎨 菜单（顶部中间位置天然避开系统窗口控制按钮和 Codex 自身菜单）。Windows 适配代码完整且有单测覆盖，目前等待实机验收，遇到问题欢迎开 Issue。商店版（Microsoft Store 安装）也支持：有应用执行别名走别名，没声明别名的包自动改走系统激活接口带参启动；商店版需要系统安装 Node.js。内置 Administrator 账户默认无法启动商店版应用，请换普通账户。
 
 ### 怎么用自己的图片做主题？
 

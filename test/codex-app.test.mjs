@@ -106,3 +106,18 @@ test("runtime diagnostics degrades honestly when probes fail", async () => {
     portBrowser: null,
   });
 });
+
+test("runtime diagnostics reads windows process command lines via powershell", async () => {
+  const exec = async (bin, args) => {
+    assert.equal(bin, "powershell");
+    assert.ok(args.join(" ").includes("Win32_Process"));
+    return { stdout: "C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT\\ChatGPT.exe --remote-debugging-port=9341\r\n" };
+  };
+  const fetchImpl = async () => { throw new Error("refused"); };
+
+  const diag = await runtimeDiagnostics({ platform: "win32", exec, fetchImpl });
+  assert.equal(diag.processRunning, true);
+  assert.equal(diag.processHasDebugFlag, true);
+  assert.equal(diag.portOpen, false);
+  assert.match(classifyInjection(diag), /^flag-present-port-closed/);
+});

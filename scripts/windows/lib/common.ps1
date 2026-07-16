@@ -1,10 +1,70 @@
 ﻿# HeiGe Codex Skin Studio 公共函数（Windows）
 $ErrorActionPreference = "Stop"
 
+function Get-CodexStorePackage {
+    # 商店版（MSIX）探测：按包名关键字找 Appx 包
+    Get-AppxPackage -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "ChatGPT|Codex|OpenAI" } |
+        Select-Object -First 1
+}
+
+function Get-CodexAumid {
+    param($Package)
+    $manifest = Get-AppxPackageManifest -Package $Package.PackageFullName
+    $appId = @($manifest.Package.Applications.Application)[0].Id
+    return "$($Package.PackageFamilyName)!$appId"
+}
+
+function Start-CodexViaActivation {
+    param([string]$Aumid, [string]$Arguments)
+    # IApplicationActivationManager：系统给打包应用传命令行参数的官方通道，
+    # 不依赖「应用执行别名」（部分 Store 包根本没声明别名，设置页里不会出现开关）
+    if (-not ("HeiGe.AppActivation" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace HeiGe {
+    [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IApplicationActivationManager {
+        [PreserveSig]
+        int ActivateApplication([In, MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [In, MarshalAs(UnmanagedType.LPWStr)] string arguments,
+            [In] int options, [Out] out uint processId);
+        [PreserveSig]
+        int ActivateForFile([In, MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [In] IntPtr itemArray, [In, MarshalAs(UnmanagedType.LPWStr)] string verb,
+            [Out] out uint processId);
+        [PreserveSig]
+        int ActivateForProtocol([In, MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+            [In] IntPtr itemArray, [Out] out uint processId);
+    }
+
+    [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+    public class ApplicationActivationManager { }
+
+    public static class AppActivation {
+        public static uint Launch(string aumid, string arguments) {
+            var manager = (IApplicationActivationManager)new ApplicationActivationManager();
+            uint pid;
+            int hr = manager.ActivateApplication(aumid, arguments, 0, out pid);
+            if (hr != 0) {
+                Marshal.ThrowExceptionForHR(hr);
+            }
+            return pid;
+        }
+    }
+}
+"@
+    }
+    return [HeiGe.AppActivation]::Launch($Aumid, $Arguments)
+}
+
 function Resolve-CodexLaunchTarget {
     param([string]$AppPath)
-    # 微软商店（MSIX）版的包内 exe 禁止按原始路径启动，Start-Process 会报「拒绝访问」，
-    # 必须改用系统生成的应用执行别名启动，别名会原样转发命令行参数
+    # 微软商店（MSIX）版的包内 exe 禁止按原始路径启动，Start-Process 会报「拒绝访问」。
+    # 优先走应用执行别名；包没声明别名时返回 aumid: 标记，由启动函数改走系统激活接口
     $windowsApps = Join-Path $env:ProgramFiles "WindowsApps"
     if (-not $AppPath.StartsWith($windowsApps, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $AppPath
@@ -15,10 +75,12 @@ function Resolve-CodexLaunchTarget {
         $alias = Join-Path $aliasDir $name
         if (Test-Path $alias) { return $alias }
     }
+    $package = Get-CodexStorePackage
+    if ($package) { return "aumid:$(Get-CodexAumid -Package $package)" }
     throw @"
 检测到微软商店版 Codex：$AppPath
-商店版不能按文件路径直接启动，需要先开启「应用执行别名」：
-设置 -> 应用 -> 高级应用设置 -> 应用执行别名，打开 ChatGPT / Codex 的开关，然后重新运行本脚本。
+但没有找到它的应用执行别名，也没有查到对应的 Appx 包。
+请改装官方独立版（非商店版）客户端，或在命令行执行 setx HEIGE_CODEX_APP "完整exe路径" 后重试。
 "@
 }
 
@@ -104,12 +166,15 @@ function Get-CodexApp {
         }
     }
 
-    # 微软商店（MSIX）安装没有常规安装目录，也不写卸载注册表项，认应用执行别名
+    # 微软商店（MSIX）安装没有常规安装目录，也不写卸载注册表项：
+    # 先认应用执行别名，包没声明别名就返回 aumid: 标记走系统激活接口
     $aliasDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
     foreach ($name in $exeNames) {
         $alias = Join-Path $aliasDir $name
         if (Test-Path $alias) { return $alias }
     }
+    $package = Get-CodexStorePackage
+    if ($package) { return "aumid:$(Get-CodexAumid -Package $package)" }
 
     throw @"
 未找到 Codex Desktop。分两种情况处理：
@@ -123,17 +188,20 @@ function Get-CodexApp {
 
 function Get-NodeRuntime {
     param([string]$AppPath)
-    $appDir = Split-Path $AppPath -Parent
-    $candidates = @(
-        (Join-Path $appDir "resources\cua_node\node.exe"),
-        (Join-Path $appDir "resources\cua_node\bin\node.exe")
-    )
-    foreach ($path in $candidates) {
-        if (Test-Path $path) { return $path }
+    # 商店版（aumid: 标记）拿不到包内自带 Node，直接找系统 Node
+    if ($AppPath -notlike "aumid:*") {
+        $appDir = Split-Path $AppPath -Parent
+        $candidates = @(
+            (Join-Path $appDir "resources\cua_node\node.exe"),
+            (Join-Path $appDir "resources\cua_node\bin\node.exe")
+        )
+        foreach ($path in $candidates) {
+            if (Test-Path $path) { return $path }
+        }
     }
     $systemNode = Get-Command node -ErrorAction SilentlyContinue
     if ($systemNode) { return $systemNode.Source }
-    throw "未找到 Node.js 运行时：Codex 自带 Node 不在预期位置，系统 PATH 里也没有 node。请安装 Node.js 后重试。"
+    throw "未找到 Node.js 运行时：商店版 Codex 无法使用自带 Node，独立版则是 Node 不在预期位置。请从 nodejs.org 安装 Node.js 后重试。"
 }
 
 function Test-Cdp {
@@ -170,19 +238,24 @@ function Start-CodexWithCdp {
     }
 
     try {
-        Start-Process -FilePath $app -ArgumentList @(
-            "--remote-debugging-address=127.0.0.1",
-            "--remote-debugging-port=$Port"
-        )
+        if ($app -like "aumid:*") {
+            Write-Host "商店版没有执行别名，改用系统激活接口带参启动……"
+            Start-CodexViaActivation -Aumid $app.Substring(6) `
+                -Arguments "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$Port" | Out-Null
+        } else {
+            Start-Process -FilePath $app -ArgumentList @(
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-debugging-port=$Port"
+            )
+        }
     } catch {
         throw @"
 启动 Codex 失败：$app
 系统报错：$($_.Exception.Message)
 常见原因与解法：
-1. 微软商店版：开启「应用执行别名」（设置 -> 应用 -> 高级应用设置 -> 应用执行别名，
-   打开 ChatGPT / Codex 的开关），然后重新运行本脚本。
+1. 正在用内置 Administrator 账户：系统默认禁止该账户启动商店版应用，请换普通用户账户运行。
 2. 安装位置特殊：命令行执行 setx HEIGE_CODEX_APP "完整exe路径"，关掉窗口重开再试。
-3. 正在用内置 Administrator 账户：系统默认禁止该账户启动商店版应用，请换普通用户账户运行。
+3. 商店版反复失败：改装官方独立版（非商店版）客户端最稳。
 本脚本不需要管理员权限，用普通权限的命令行运行即可。
 "@
     }
@@ -190,5 +263,11 @@ function Start-CodexWithCdp {
         if (Test-Cdp -Port $Port) { return }
         Start-Sleep -Milliseconds 250
     }
-    throw "Codex 未在 $Port 端口就绪。请彻底退出 Codex 后重试。"
+    # 端口没开，按两类失败分别给指引（和 macOS 侧同一套分诊）
+    $flagged = @(Get-CimInstance Win32_Process -Filter "Name='ChatGPT.exe' or Name='Codex.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "remote-debugging-port" })
+    if ($flagged.Count -gt 0) {
+        throw "Codex 已带调试参数启动，但端口 $Port 未开放：当前 Codex 版本可能禁用了本机调试端口。请到 https://github.com/HeiGeAi/heige-codex-skin-studio/issues 反馈，附上报错原文和 Codex 版本号。"
+    }
+    throw "调试参数未生效：可能被残留的旧实例接管，或商店版激活没把参数传进应用。请彻底退出 Codex（任务管理器确认无 ChatGPT/Codex 进程）后重试；商店版反复失败请开 Issue 附报错原文。"
 }
