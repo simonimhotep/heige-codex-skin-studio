@@ -37,6 +37,10 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/customize.command"
 open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 ```
 
+### Windows（新增，待实机验收）
+
+双击 `scripts\windows\install.bat` 安装并默认应用 Miku 预设，`pause.bat` 暂停，`customize.bat` 选图做皮肤。实现完整、单测覆盖 win32 分支，等待实机验收反馈。
+
 ## 交给 Codex 使用
 
 把 `heige-codex-skin-studio.skill` 交给 Codex，可以直接说：
@@ -105,7 +109,7 @@ node src/cli.mjs doctor
 
 ## 设计边界
 
-这是一个轻量工具，不是主题商店或复杂设计平台。皮肤跟随当前 renderer 存活，Codex 完整重载界面后重新运行一次 `apply.command` 即可。当前版本只保证 macOS，且 CDP 只绑定本机回环地址。
+这是一个轻量工具，不是主题商店或复杂设计平台。皮肤跟随当前 renderer 存活，Codex 完整重载界面后重新运行一次 `apply.command` 即可。macOS 已实机验证；Windows 适配为新增能力，等待实机反馈。CDP 只绑定本机回环地址。
 
 旧版 ASAR 修改器已保存在 Git 标签 `v5-full-legacy` 和分支 `codex/archive-asar-v5`，不再作为主产品维护。
 

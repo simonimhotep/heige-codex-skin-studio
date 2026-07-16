@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { access } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { discoverCodex } from "./codex-app.mjs";
 import { DEFAULT_CDP_PORT, DEFAULT_THEME_ID, resolveStudioPaths } from "./constants.mjs";
 import { applySkin, removeSkin, skinStatus } from "./injector.mjs";
 import { loadTheme } from "./theme-schema.mjs";
@@ -86,10 +86,8 @@ export async function runCli(argv, overrides = {}) {
   }
   if (command === "status") return deps.skinStatus({ port: portFrom(args.port) });
   if (command === "doctor") {
-    const app = "/Applications/ChatGPT.app";
-    const node = join(app, "Contents/Resources/cua_node/bin/node");
-    const exists = async (path) => access(path).then(() => true, () => false);
-    return { app, appFound: await exists(app), bundledNode: node, bundledNodeFound: await exists(node), cdpPort: DEFAULT_CDP_PORT };
+    const discovery = await (deps.discoverCodex ?? discoverCodex)();
+    return { ...discovery, cdpPort: DEFAULT_CDP_PORT };
   }
   throw new Error(`未知命令：${command}`);
 }

@@ -39,6 +39,10 @@ test("packages and installs a self-contained distribution", async (t) => {
     "custom-pet/install.command",
     "scripts/apply.command",
     "scripts/pause.command",
+    "scripts/windows/apply.ps1",
+    "scripts/windows/apply.bat",
+    "scripts/windows/install.ps1",
+    "scripts/windows/lib/common.ps1",
   ]) {
     await access(join(installed, relative));
   }

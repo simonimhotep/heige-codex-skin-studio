@@ -10,14 +10,16 @@ export const DEFAULT_CDP_PORT = 9341;
 export const EXPECTED_BUNDLE_ID = "com.openai.codex";
 export const EXPECTED_TEAM_ID = "2DC432GLL2";
 
-export function resolveStudioPaths({ home = homedir() } = {}) {
+export function resolveStudioPaths({
+  home = homedir(),
+  platform = process.platform,
+  env = process.env,
+} = {}) {
   const installRoot = join(home, ".codex", PRODUCT_ID);
-  const stateRoot = join(
-    home,
-    "Library",
-    "Application Support",
-    "HeiGeCodexSkinStudio",
-  );
+  const stateRoot =
+    platform === "win32"
+      ? join(env.APPDATA ?? join(home, "AppData", "Roaming"), "HeiGeCodexSkinStudio")
+      : join(home, "Library", "Application Support", "HeiGeCodexSkinStudio");
 
   return {
     installRoot,
