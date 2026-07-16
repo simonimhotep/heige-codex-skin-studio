@@ -209,3 +209,5 @@ Quick start: run `scripts/install.command` on macOS or `scripts\\windows\\instal
 ## 许可证与素材
 
 代码使用 [MIT License](LICENSE)。预览与预设中的角色、名称和视觉素材权利属于各自权利人（初音未来、原神、鸣潮、火影忍者、恋与深空等），仅用于主题概念展示，不由本项目的软件许可证授权，详见 [NOTICE.md](NOTICE.md)。
+
+**免责声明**：本项目为非官方粉丝作品，预设与预览中的图片素材部分来源于网络与 AI 生成内容，版权归原权利人所有，仅供个人主题展示与学习交流使用，不作商业用途。如任何素材涉及您的合法权益，请提 [Issue](https://github.com/HeiGeAi/heige-codex-skin-studio/issues) 告知，我们将第一时间删除或替换。
