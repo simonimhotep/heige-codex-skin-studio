@@ -1,6 +1,19 @@
 #!/bin/zsh
 set -euo pipefail
-cd "${0:A:h:h}"
-node src/theme-patch.mjs check
-node src/theme-patch.mjs install
-echo "主题已安装。完全退出 Codex 后重新打开即可生效。"
+
+SOURCE="${0:A:h:h}"
+TARGET="$HOME/.codex/heige-codex-skin-studio"
+TEMP="${TARGET}.tmp.$$"
+
+rm -rf "$TEMP"
+mkdir -p "$TEMP"
+cp "$SOURCE/package.json" "$TEMP/"
+cp -R "$SOURCE/src" "$TEMP/"
+cp -R "$SOURCE/themes" "$TEMP/"
+cp -R "$SOURCE/scripts" "$TEMP/"
+cp -R "$SOURCE/custom-pet" "$TEMP/"
+rm -rf "$TARGET"
+mv "$TEMP" "$TARGET"
+
+echo "HeiGe Codex Skin Studio 已安装到：$TARGET"
+open "$TARGET/scripts/apply.command"

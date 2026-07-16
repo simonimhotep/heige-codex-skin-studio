@@ -1,89 +1,143 @@
-# Codex Miku Theme
+# HeiGe Codex Skin Studio | Codex 换肤工作室
 
-把 macOS Codex Desktop 改造成高饱和天蓝、粉紫、雾白玻璃、全高角色主视觉与动画宠物结合的初音未来主题。
+<div align="center">
 
-![Codex Miku Theme v4](output/playwright/codex-miku-theme-v4-full-canvas-pet.png)
+**给 Codex Desktop 一键换肤：一张图片就是一个主题，右上角菜单即时切换。**
 
-## 一键 Skill 安装
+*Reskin the Codex Desktop app on macOS: one image becomes a theme, switch instantly from an in-app menu.*
 
-从 Releases 下载 `codex-miku-theme.skill`，交给 Codex 并说：
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS-black)
+![Codex Desktop](https://img.shields.io/badge/Codex-Desktop-10a37f)
 
-> 安装这个 Skill，然后帮我安装初音未来主题和配套宠物。
+[中文](#这是什么) · [English](#english)
 
-Skill 会先检查 Codex 版本，然后排队安装。按一次 `Command + Q` 完全退出 Codex，主题安装完成后应用会自动重新打开。
+</div>
 
-也可以手动解压 Skill：
+![真机截图：Miku 主题 + 右上角一键切换菜单](docs/images/miku-switcher-live.jpg)
 
-```bash
-mkdir -p ~/.agents/skills
-unzip codex-miku-theme.skill -d ~/.agents/skills
-```
+*真机截图：Miku 主题运行中，右上角 🎨 菜单列出全部内置主题，点击即时切换。*
 
-## 当前状态
+## 这是什么
 
-- 已适配 macOS Codex Desktop `26.707.72221`，构建号 `5307`。
-- v4 源码、可分发 Skill 与安装包均已完成。
-- 用户参考图已裁成全高主画布、角色、侧栏纹理和拍立得 4 张独立素材，并嵌入 4 个低频 PNG 资源槽。裁剪坐标、源图与目标图 SHA-256 记录在 `assets/miku-crops.json`。
-- 原生 `Codex` 宠物槽已替换成与壁纸人物一致的 Q 版初音未来，保留待机、奔跑、跳跃、等待、审查、失败和转身动画。
-- 真实根节点、侧栏选中态、主区域、顶栏、输入框、用户消息、助手消息、审批卡片和弹窗均已按稳定选择器覆盖。
-- 首次安装会在 `~/Library/Application Support/Codex Miku Theme/backups/` 创建经过 SHA-256 校验的原始 ASAR 备份。
-- 安装后 ASAR 字节数保持不变，主题 CSS 为 `7997 / 8003` 字节。
-- 自动测试包含真实 CLI 子进程的安装、宠物资源替换、失败回滚、同尺寸更新拒绝、v2 恢复、运行进程门禁、原子 CAS 前后竞态保护与完整往返测试。
+一个效率优先的 macOS Codex Desktop 换肤工具。它通过本机回环 CDP 把主题实时注入 Codex 界面，不修改 `app.asar`，不破坏应用签名，也不需要为每次 Codex 更新重新适配。
 
-## 生效方法
+- **一键切换**：应用皮肤后 Codex 右上角出现 🎨 菜单，所有已装主题和原生界面即点即换，零等待。
+- **一张图片就是一个主题**：任意 PNG、JPG、JPEG、WebP 直接生成皮肤（配色 + 背景底图）。
+- **9 个内置预设**：高精度定制的 `Miku 488137`，加上原神、鸣潮、火影忍者、恋与深空各两款轻量主题。
+- **AI 生成主题**：把 Skill 交给 Codex，让它先用生图能力产出主图，再自动做成皮肤，无需额外 API Key。
+- **可选桌宠**：独立的 `Miku Future` 动画桌面宠物，不覆盖 Codex 内置宠物。
+- **随时还原**：暂停皮肤或切回原生界面，官方安装包始终原封不动。
 
-使用 `Command + Q` 完全退出 Codex，双击安装器，安装成功后再从 Dock 重新打开。打开「设置 > 宠物」并选择 `Codex`，显示的就是初音未来动画宠物。
+![真机截图：原神星夜主题](docs/images/genshin-night-live.jpg)
 
-## 检查状态
+*真机截图：原神 · 星夜 轻量主题（无文字干净底图 + 自动配色）。*
 
-```bash
-npm run check
-```
+## 最快使用
 
-## 重新安装与版本边界
-
-重新安装前必须先用 `Command + Q` 完全退出 Codex。安装器会检查整个应用包内是否还有活动进程，只要主进程、渲染器、更新辅助进程或工具进程仍在，就拒绝修改。
+需要 macOS 和已安装的 Codex Desktop。下载本仓库后：
 
 ```bash
-open scripts/install.command
+open "<仓库路径>/scripts/install.command"
 ```
 
-安装器只接受已验证的 `26.707.72221（5307）`。它会校验当前完整 ASAR、CSS 容量、4 个背景图片槽和 1 个原生宠物槽，再用 macOS 原子交换完成 CAS 提交。若交换瞬间目标已变化，它会原子换回并拒绝覆盖；若状态文件写入失败，它会把 ASAR 回滚到本次安装前的精确字节。
+安装脚本会把工具放到 `~/.codex/heige-codex-skin-studio`，并默认应用 Miku 预设。应用皮肤时 Codex 会被正常退出并以本机调试模式重新打开，当前任务请先保存。
 
-Codex 官方升级后不要直接套用旧主题。安装器会拒绝未适配的新构建，避免用旧备份覆盖同尺寸更新；需要先按新构建重新确认入口与资源槽。
-
-## 一键恢复原版
-
-恢复前同样必须先完全退出 Codex。
+之后的日常切换都在 Codex 右上角 🎨 菜单里完成。想用自己的图片做皮肤：
 
 ```bash
-open scripts/restore.command
+open "$HOME/.codex/heige-codex-skin-studio/scripts/customize.command"
 ```
 
-恢复脚本会核对完整主题 ASAR 哈希。若 Codex 在安装后被更新或被其他工具修改，它会拒绝用旧备份覆盖。旧版 v2 状态会先验证主题 HTML、图片哈希和其余所有 ASAR 字节，再执行安全恢复。
-
-## 重新生成裁图
+暂停皮肤、回到原生外观：
 
 ```bash
-open scripts/build-assets.command
+open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
 ```
 
-脚本会先核对参考图 SHA-256，再用固定坐标和 FFmpeg 滤镜生成 4 张裁图，最后逐张核对目标 SHA-256。
+注意：Codex 手动重启后注入会消失（CDP 方案的天性），重跑一次 `apply.command` 即可回来。
 
-## 签名边界
+## 交给 Codex 使用
 
-官方签名覆盖 `app.asar`。主题安装后，`codesign --verify --deep --strict` 的真实结果为 `a sealed resource is missing or invalid`。项目不会临时重签应用，因为这可能影响钥匙串和登录权限。若 macOS 阻止下次启动，先运行恢复脚本即可回到官方资源。
+把 `output/heige-codex-skin-studio.skill` 交给 Codex，可以直接说：
 
-## 开发与测试
+> 用这张图片给 Codex 做一个皮肤并应用。
 
-需要 Node.js 20 或更新版本：
+或者：
+
+> 先生成一张蓝紫色赛博城市主图，再把它做成 Codex 皮肤。
+
+Skill 会优先调用 Codex 当前可用的图片生成能力产出主图，然后调用本地确定性工具创建并应用主题。
+
+## 极简主题格式
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "my-skin",
+  "name": "My Skin",
+  "hero": "hero.webp",
+  "colors": {
+    "accent": "#24C9D7",
+    "secondary": "#EF8FD3",
+    "surface": "#F7FBFF",
+    "text": "#17344F"
+  }
+}
+```
+
+只有 `schemaVersion`、`id`、`name` 和 `hero` 必填。图片必须位于主题目录内，颜色和文案都可省略。
+
+## 主题概念图库
+
+这些 4K 概念图展示「一张图就是一个皮肤方向」的设计效果，内置的 8 款轻量预设使用同场景的无文字干净壁纸版本。
+
+| 原神 | 原神 |
+| --- | --- |
+| ![原神 Codex UI 概念一](assets/previews/genshin-impact-codex-ui-1.webp) | ![原神 Codex UI 概念二](assets/previews/genshin-impact-codex-ui-2.webp) |
+
+| 鸣潮 | 鸣潮 |
+| --- | --- |
+| ![鸣潮 Codex UI 概念一](assets/previews/wuthering-waves-codex-ui-1.webp) | ![鸣潮 Codex UI 概念二](assets/previews/wuthering-waves-codex-ui-2.webp) |
+
+| 火影忍者 | 火影忍者 |
+| --- | --- |
+| ![火影忍者 Codex UI 概念一](assets/previews/naruto-codex-ui-1.webp) | ![火影忍者 Codex UI 概念二](assets/previews/naruto-codex-ui-2.webp) |
+
+| 恋与深空 | 恋与深空 |
+| --- | --- |
+| ![恋与深空 Codex UI 概念一](assets/previews/love-and-deepspace-codex-ui-1.webp) | ![恋与深空 Codex UI 概念二](assets/previews/love-and-deepspace-codex-ui-2.webp) |
+
+## 命令行
+
+```bash
+node src/cli.mjs list
+node src/cli.mjs create --image "/absolute/path/hero.webp" --name "My Skin"
+node src/cli.mjs apply --theme my-skin-id
+node src/cli.mjs status
+node src/cli.mjs pause
+node src/cli.mjs doctor
+```
+
+## 设计边界
+
+这是一个轻量工具。皮肤跟随当前 renderer 存活，Codex 完整重载界面后重新运行一次 `apply.command` 即可。当前版本只保证 macOS，CDP 只绑定本机回环地址 `127.0.0.1`。
+
+本仓库前身是走 ASAR 修改路线的 codex-miku-theme，旧实现保存在历史提交中（tag `v5-asar-legacy`），已由当前 CDP 注入方案取代。
+
+## 开发
 
 ```bash
 npm test
+npm run doctor
 ```
 
-当前测试覆盖 ASAR 解析、固定尺寸资源替换、版本门禁、进程门禁、原子 CAS、失败回滚、完整安装恢复往返、主题资源和 Skill 包结构。
+## English
 
-## 许可证
+**HeiGe Codex Skin Studio** reskins the Codex Desktop app on macOS through loopback-only CDP injection. It never touches `app.asar` or the code signature. Any single image becomes a theme (palette + backdrop); after applying once, a 🎨 menu in the top-right corner of Codex switches between every installed theme and the native look instantly. Nine presets ship built in: the fully customized `Miku 488137` showcase plus eight lightweight game-inspired themes. Hand the bundled `.skill` to Codex and it can even generate theme artwork with its own image tools, then install the result deterministically.
 
-源代码使用 [MIT License](LICENSE)。角色名称、标识和视觉素材不由 MIT 软件许可证授予额外权利，详见 [NOTICE](NOTICE.md)。
+Quick start: run `scripts/install.command`, then switch themes from the in-app menu. Pause anytime with `scripts/pause.command`; a normal Codex restart always returns to stock.
+
+## 许可证与素材
+
+代码使用 [MIT License](LICENSE)。预览与预设中的角色、名称和视觉素材权利属于各自权利人（初音未来、原神、鸣潮、火影忍者、恋与深空等），仅用于主题概念展示，不由本项目的软件许可证授权，详见 [NOTICE.md](NOTICE.md)。
