@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   link,
   lstat,
@@ -21,6 +22,7 @@ import {
 } from "node:path";
 
 const LOCK_SCHEMA_VERSION = 2;
+const QUARANTINE_SCHEMA_VERSION = 1;
 const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const MAX_ACQUIRE_ATTEMPTS = 32;
@@ -37,6 +39,8 @@ const SUPPORTED_FAULTS = new Set([
   "after-compact-cleanup",
 ]);
 const leaseCapabilities = new WeakMap();
+const activeCommitContext = new AsyncLocalStorage();
+const activeQuarantineDirectories = new Set();
 
 class OperationLockError extends Error {
   constructor(code, message, options = undefined) {
@@ -538,6 +542,7 @@ async function createPrivateQuarantine(parentPath) {
       await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });
       const metadata = await lstat(path);
       requirePrivateDirectory(metadata, `artifact quarantine ${path}`);
+      activeQuarantineDirectories.add(path);
       return path;
     } catch (error) {
       if (error.code === "EEXIST") continue;
@@ -554,27 +559,90 @@ async function createPrivateQuarantine(parentPath) {
   );
 }
 
+async function clearQuarantineDirectory({
+  quarantineDirectory,
+  quarantinePath,
+  manifestPath,
+  durability,
+}) {
+  await unlinkIfPresent(quarantinePath);
+  await unlinkIfPresent(manifestPath);
+  await rmdir(quarantineDirectory);
+  await durability.syncDirectory(dirname(quarantineDirectory));
+}
+
+async function restoreQuarantinedArtifact({
+  path,
+  quarantineDirectory,
+  quarantinePath,
+  manifestPath,
+  moved,
+  durability,
+}) {
+  try {
+    await link(quarantinePath, path);
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    const existing = await lstat(path);
+    if (existing.dev !== moved.dev || existing.ino !== moved.ino) throw error;
+  }
+  await durability.syncDirectory(dirname(path));
+  await clearQuarantineDirectory({
+    quarantineDirectory,
+    quarantinePath,
+    manifestPath,
+    durability,
+  });
+}
+
 async function removeExactArtifact({
   path,
   snapshot,
   options,
   durability,
   description,
+  preserveAfterMove,
 }) {
   await runStage(options, "before-artifact-tombstone", { path, snapshot });
   const parentPath = dirname(path);
   const quarantineDirectory = await createPrivateQuarantine(parentPath);
   const quarantinePath = join(quarantineDirectory, "artifact");
+  const manifestPath = join(quarantineDirectory, "manifest");
   try {
+    await writeSyncedExclusiveFile(
+      manifestPath,
+      serializeJson({
+        schemaVersion: QUARANTINE_SCHEMA_VERSION,
+        originalName: basename(path),
+        expected: {
+          dev: String(snapshot.metadata.dev),
+          ino: String(snapshot.metadata.ino),
+        },
+      }),
+    );
+    await durability.syncDirectory(quarantineDirectory);
+    await durability.syncDirectory(parentPath);
     try {
       await rename(path, quarantinePath);
     } catch (error) {
       if (error.code === "ENOENT") {
-        await rmdir(quarantineDirectory).catch(() => {});
+        await clearQuarantineDirectory({
+          quarantineDirectory,
+          quarantinePath,
+          manifestPath,
+          durability,
+        });
         return false;
       }
       throw error;
     }
+    await durability.syncDirectory(parentPath);
+    await durability.syncDirectory(quarantineDirectory);
+    await runStage(options, "after-artifact-tombstone", {
+      path,
+      quarantinePath,
+      snapshot,
+    });
 
     const moved = await lstat(quarantinePath);
     if (
@@ -583,20 +651,70 @@ async function removeExactArtifact({
     ) {
       let restoreError;
       try {
-        await link(quarantinePath, path);
-        await durability.syncDirectory(parentPath);
+        await restoreQuarantinedArtifact({
+          path,
+          quarantineDirectory,
+          quarantinePath,
+          manifestPath,
+          moved,
+          durability,
+        });
       } catch (error) {
         restoreError = error;
       }
       throw lockError(
         "LOCK_ARTIFACT_CHANGED",
-        `${description} changed inode before quarantine; preserved at ${quarantinePath}`,
+        `${description} changed inode before quarantine and was not deleted`,
         restoreError,
       );
     }
 
-    await unlink(quarantinePath);
-    await rmdir(quarantineDirectory);
+    let preserve = false;
+    if (typeof preserveAfterMove === "function") {
+      try {
+        preserve = await preserveAfterMove({
+          metadata: moved,
+          path,
+          quarantinePath,
+        });
+      } catch (error) {
+        try {
+          await restoreQuarantinedArtifact({
+            path,
+            quarantineDirectory,
+            quarantinePath,
+            manifestPath,
+            moved,
+            durability,
+          });
+        } catch (restoreError) {
+          throw aggregateLockErrors(
+            "LOCK_ARTIFACT_RESTORE_FAILED",
+            `${description} validation and exact restoration both failed`,
+            [error, restoreError],
+          );
+        }
+        throw error;
+      }
+    }
+    if (preserve) {
+      await restoreQuarantinedArtifact({
+        path,
+        quarantineDirectory,
+        quarantinePath,
+        manifestPath,
+        moved,
+        durability,
+      });
+      return false;
+    }
+
+    await clearQuarantineDirectory({
+      quarantineDirectory,
+      quarantinePath,
+      manifestPath,
+      durability,
+    });
     return true;
   } catch (error) {
     if (error instanceof OperationLockError) throw error;
@@ -605,6 +723,8 @@ async function removeExactArtifact({
       `could not quarantine exact ${description} ${path}`,
       error,
     );
+  } finally {
+    activeQuarantineDirectories.delete(quarantineDirectory);
   }
 }
 
@@ -1004,6 +1124,427 @@ async function cleanupProvenDeadCrashArtifacts({
     })) || changed;
   }
   if (changed) await durability.syncDirectory(parentPath);
+}
+
+function parseFinalArtifactName(lockPath, name) {
+  const base = basename(lockPath);
+  for (const [kind, marker] of [
+    ["successor", `${base}.successor.`],
+    ["heartbeat", `${base}.heartbeat.`],
+    ["release", `${base}.released.`],
+  ]) {
+    if (!name.startsWith(marker)) continue;
+    const nonce = name.slice(marker.length);
+    if (!NONCE_PATTERN.test(nonce)) return null;
+    return { kind, nonce };
+  }
+  return null;
+}
+
+async function readFinalArtifact(path, expected) {
+  try {
+    const record = await readJsonFile(path, {
+      allowMissing: true,
+      malformedCode: "LOCK_FINAL_ARTIFACT_MALFORMED",
+      permissionsCode: "LOCK_FINAL_ARTIFACT_PERMISSIONS",
+      description: `final ${expected.kind} artifact`,
+    });
+    if (record === null) return null;
+    if (expected.kind === "successor") {
+      const owner = validateOwnerRecord(
+        record.value,
+        "LOCK_FINAL_ARTIFACT_MALFORMED",
+      );
+      if (
+        owner.predecessor === null ||
+        owner.predecessor.nonce !== expected.nonce
+      ) {
+        return null;
+      }
+      return { ...record, expected, owner, path };
+    }
+    if (expected.kind === "heartbeat") {
+      const heartbeat = validateHeartbeatRecord(record.value, expected.nonce);
+      return { ...record, expected, heartbeat, path };
+    }
+    const release = validateDetachedReleaseRecord(record.value, expected.nonce);
+    return { ...record, expected, path, release };
+  } catch {
+    return null;
+  }
+}
+
+function finalArtifactMatchesReachable(artifact, chain) {
+  if (artifact.expected.kind === "successor") {
+    return chain.claims.some((claim) => claim.path === artifact.path);
+  }
+  return chain.claims.some((claim) =>
+    claim.owner.nonce === artifact.expected.nonce);
+}
+
+function finalArtifactCouldBeReachableAfterMove(artifact, chain) {
+  if (artifact.expected.kind === "successor") {
+    return chain.claims.some((claim) =>
+      claim.owner.nonce === artifact.owner.predecessor.nonce);
+  }
+  return chain.claims.some((claim) =>
+    claim.owner.nonce === artifact.expected.nonce);
+}
+
+async function cleanupUnreachableFinalArtifacts({
+  lockPath,
+  parentPath,
+  durability,
+  options,
+}) {
+  let entries;
+  try {
+    entries = await readdir(parentPath, { withFileTypes: true });
+  } catch (error) {
+    throw lockError(
+      "LOCK_ARTIFACT_SCAN_FAILED",
+      `could not scan final lock artifacts in ${parentPath}`,
+      error,
+    );
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const expected = parseFinalArtifactName(lockPath, entry.name);
+    if (expected === null) continue;
+    const path = join(parentPath, entry.name);
+    const initial = await readFinalArtifact(path, expected);
+    if (initial === null) continue;
+    const initialChain = await findTail(lockPath);
+    if (finalArtifactMatchesReachable(initial, initialChain)) continue;
+
+    const confirmed = await readFinalArtifact(path, expected);
+    if (confirmed === null || !sameFileSnapshot(initial, confirmed)) continue;
+    const latestChain = await findTail(lockPath);
+    if (finalArtifactMatchesReachable(confirmed, latestChain)) continue;
+
+    await removeExactArtifact({
+      path,
+      snapshot: confirmed,
+      options,
+      durability,
+      description: `unreachable final ${expected.kind} artifact`,
+      preserveAfterMove: async () => {
+        const postMoveChain = await findTail(lockPath);
+        return finalArtifactCouldBeReachableAfterMove(
+          confirmed,
+          postMoveChain,
+        );
+      },
+    });
+  }
+}
+
+function parseQuarantineDirectoryName(name) {
+  const prefix = ".operation-lock-gc.";
+  if (!name.startsWith(prefix)) return null;
+  const parts = name.slice(prefix.length).split(".");
+  if (parts.length !== 2 || !/^[1-9][0-9]*$/u.test(parts[0])) return null;
+  const pid = Number(parts[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !NONCE_PATTERN.test(parts[1])) {
+    return null;
+  }
+  return { nonce: parts[1], pid };
+}
+
+async function readPrivateArtifactSnapshot(path, { allowMissing = false } = {}) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if (allowMissing && error.code === "ENOENT") return null;
+    throw error;
+  }
+  requirePrivateFile(metadata, "LOCK_ARTIFACT_PERMISSIONS", `artifact ${path}`);
+  return {
+    metadata: { dev: metadata.dev, ino: metadata.ino },
+    raw: await readFile(path, "utf8"),
+  };
+}
+
+function validateQuarantineManifest(value, lockPath) {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !exactKeys(value, ["expected", "originalName", "schemaVersion"]) ||
+    value.schemaVersion !== QUARANTINE_SCHEMA_VERSION ||
+    typeof value.originalName !== "string" ||
+    value.originalName !== basename(value.originalName) ||
+    !value.originalName.startsWith(`${basename(lockPath)}.`) ||
+    value.expected === null ||
+    typeof value.expected !== "object" ||
+    Array.isArray(value.expected) ||
+    !exactKeys(value.expected, ["dev", "ino"]) ||
+    typeof value.expected.dev !== "string" ||
+    value.expected.dev.length === 0 ||
+    typeof value.expected.ino !== "string" ||
+    value.expected.ino.length === 0
+  ) {
+    throw lockError(
+      "LOCK_QUARANTINE_MALFORMED",
+      "artifact quarantine manifest has an invalid schema",
+    );
+  }
+  return value;
+}
+
+async function readQuarantineContents(path, lockPath) {
+  const entries = await readdir(path, { withFileTypes: true });
+  if (
+    entries.some((entry) =>
+      !entry.isFile() || !["artifact", "manifest"].includes(entry.name))
+  ) {
+    return null;
+  }
+  const artifact = await readPrivateArtifactSnapshot(
+    join(path, "artifact"),
+    { allowMissing: true },
+  );
+  const manifestRecord = await readJsonFile(join(path, "manifest"), {
+    allowMissing: true,
+    malformedCode: "LOCK_QUARANTINE_MALFORMED",
+    permissionsCode: "LOCK_QUARANTINE_PERMISSIONS",
+    description: "artifact quarantine manifest",
+  });
+  const manifest =
+    manifestRecord === null
+      ? null
+      : validateQuarantineManifest(manifestRecord.value, lockPath);
+  return { artifact, manifest, manifestRecord };
+}
+
+function sameOptionalFileSnapshot(left, right) {
+  if (left === null || right === null) return left === right;
+  return sameFileSnapshot(left, right);
+}
+
+function sameQuarantineContents(left, right) {
+  return (
+    sameOptionalFileSnapshot(left.artifact, right.artifact) &&
+    sameOptionalFileSnapshot(left.manifestRecord, right.manifestRecord)
+  );
+}
+
+async function quarantineProducerIsLive(pid, readProcessIdentity) {
+  if (pid === process.pid) return false;
+  if (typeof readProcessIdentity !== "function") return true;
+  try {
+    const current = await readProcessIdentity(pid);
+    if (current === null || current === undefined) return false;
+    return validateIdentity(current, "LOCK_PROCESS_PROBE_INVALID").pid === pid;
+  } catch {
+    return true;
+  }
+}
+
+async function allocateQuarantineTombstone(parentPath) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const path = join(
+      parentPath,
+      `.operation-lock-gc.${process.pid}.${createNonce()}`,
+    );
+    if ((await lstatIfPresent(path)) === null) return path;
+  }
+  throw lockError(
+    "LOCK_ARTIFACT_CLEANUP_FAILED",
+    "could not allocate a quarantine directory tombstone",
+  );
+}
+
+async function restoreQuarantineDirectory(tombstonePath, originalPath) {
+  try {
+    await rename(tombstonePath, originalPath);
+  } catch {
+    // A conflicting directory is preserved alongside this current-process
+    // tombstone. A later process can re-evaluate both without data loss.
+  }
+}
+
+async function cleanupOrphanQuarantines({
+  lockPath,
+  parentPath,
+  readProcessIdentity,
+  durability,
+}) {
+  const entries = await readdir(parentPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const producer = parseQuarantineDirectoryName(entry.name);
+    if (producer === null) continue;
+    const originalDirectory = join(parentPath, entry.name);
+    if (activeQuarantineDirectories.has(originalDirectory)) continue;
+    if (await quarantineProducerIsLive(producer.pid, readProcessIdentity)) continue;
+    let initialDirectory;
+    let initialContents;
+    try {
+      initialDirectory = await lstat(originalDirectory);
+      requirePrivateDirectory(
+        initialDirectory,
+        `artifact quarantine ${originalDirectory}`,
+      );
+      initialContents = await readQuarantineContents(originalDirectory, lockPath);
+    } catch {
+      continue;
+    }
+    if (initialContents === null) continue;
+    const confirmedDirectory = await lstatIfPresent(originalDirectory);
+    if (
+      confirmedDirectory === null ||
+      confirmedDirectory.dev !== initialDirectory.dev ||
+      confirmedDirectory.ino !== initialDirectory.ino ||
+      await quarantineProducerIsLive(producer.pid, readProcessIdentity)
+    ) {
+      continue;
+    }
+
+    const tombstoneDirectory = await allocateQuarantineTombstone(parentPath);
+    activeQuarantineDirectories.add(tombstoneDirectory);
+    try {
+      await rename(originalDirectory, tombstoneDirectory);
+    } catch (error) {
+      activeQuarantineDirectories.delete(tombstoneDirectory);
+      if (error.code === "ENOENT") continue;
+      throw lockError(
+        "LOCK_ARTIFACT_CLEANUP_FAILED",
+        `could not claim orphan quarantine ${originalDirectory}`,
+        error,
+      );
+    }
+    await durability.syncDirectory(parentPath);
+
+    try {
+      const movedDirectory = await lstat(tombstoneDirectory);
+      if (
+        movedDirectory.dev !== initialDirectory.dev ||
+        movedDirectory.ino !== initialDirectory.ino
+      ) {
+        await restoreQuarantineDirectory(tombstoneDirectory, originalDirectory);
+        throw lockError(
+          "LOCK_ARTIFACT_CHANGED",
+          `orphan quarantine ${originalDirectory} changed before collection`,
+        );
+      }
+      const confirmedContents = await readQuarantineContents(
+        tombstoneDirectory,
+        lockPath,
+      );
+      if (
+        confirmedContents === null ||
+        !sameQuarantineContents(initialContents, confirmedContents)
+      ) {
+        await restoreQuarantineDirectory(tombstoneDirectory, originalDirectory);
+        continue;
+      }
+
+      const artifactPath = join(tombstoneDirectory, "artifact");
+      if (
+        confirmedContents.artifact !== null &&
+        confirmedContents.manifest !== null
+      ) {
+        const manifest = confirmedContents.manifest;
+        const manifestPath = join(tombstoneDirectory, "manifest");
+        const originalPath = join(parentPath, manifest.originalName);
+        const existing = await lstatIfPresent(originalPath);
+        if (
+          existing !== null &&
+          (existing.dev !== confirmedContents.artifact.metadata.dev ||
+            existing.ino !== confirmedContents.artifact.metadata.ino)
+        ) {
+          await restoreQuarantineDirectory(tombstoneDirectory, originalDirectory);
+          continue;
+        }
+        const rebuildChainOrRestore = async () => {
+          try {
+            return await findTail(lockPath);
+          } catch (error) {
+            try {
+              await restoreQuarantinedArtifact({
+                path: originalPath,
+                quarantineDirectory: tombstoneDirectory,
+                quarantinePath: artifactPath,
+                manifestPath,
+                moved: confirmedContents.artifact.metadata,
+                durability,
+              });
+            } catch (restoreError) {
+              throw aggregateLockErrors(
+                "LOCK_ARTIFACT_RESTORE_FAILED",
+                "orphan quarantine validation and canonical restoration both failed",
+                [error, restoreError],
+              );
+            }
+            throw error;
+          }
+        };
+        const expectedInodeMatches =
+          manifest.expected.dev === String(confirmedContents.artifact.metadata.dev) &&
+          manifest.expected.ino === String(confirmedContents.artifact.metadata.ino);
+        if (!expectedInodeMatches) {
+          if (existing === null) {
+            await link(artifactPath, originalPath);
+            await durability.syncDirectory(parentPath);
+          }
+          await rebuildChainOrRestore();
+        } else if (existing === null) {
+          const expected = parseFinalArtifactName(lockPath, manifest.originalName);
+          if (expected !== null) {
+            const artifact = await readFinalArtifact(artifactPath, expected);
+            if (artifact === null) {
+              await restoreQuarantinedArtifact({
+                path: originalPath,
+                quarantineDirectory: tombstoneDirectory,
+                quarantinePath: artifactPath,
+                manifestPath,
+                moved: confirmedContents.artifact.metadata,
+                durability,
+              });
+              throw lockError(
+                "LOCK_FINAL_ARTIFACT_MALFORMED",
+                `quarantined final artifact ${manifest.originalName} changed schema before recovery`,
+              );
+            }
+            const latestChain = await rebuildChainOrRestore();
+            if (finalArtifactCouldBeReachableAfterMove(artifact, latestChain)) {
+              await link(artifactPath, originalPath);
+              await durability.syncDirectory(parentPath);
+            }
+          } else {
+            await findTail(lockPath);
+          }
+        } else {
+          await rebuildChainOrRestore();
+        }
+      } else {
+        // Manifest-less directories predate durable quarantine manifests and
+        // were used only for temporary artifacts. Rebuild the live chain
+        // immediately before collecting their unreachable extra link.
+        await findTail(lockPath);
+      }
+
+      await clearQuarantineDirectory({
+        quarantineDirectory: tombstoneDirectory,
+        quarantinePath: artifactPath,
+        manifestPath: join(tombstoneDirectory, "manifest"),
+        durability,
+      });
+    } catch (error) {
+      if (error instanceof OperationLockError) throw error;
+      await restoreQuarantineDirectory(tombstoneDirectory, originalDirectory);
+      throw lockError(
+        "LOCK_ARTIFACT_CLEANUP_FAILED",
+        `could not collect orphan quarantine ${originalDirectory}`,
+        error,
+      );
+    } finally {
+      activeQuarantineDirectories.delete(tombstoneDirectory);
+    }
+  }
 }
 
 function parseHeartbeatTemporaryName(lockPath, name) {
@@ -1477,7 +2018,16 @@ export function commitWithOperationLease(lease, commit) {
   const operation = (async () => {
     await previous;
     await assertCapabilityOwned(capability);
-    return commit();
+    const context = {
+      active: true,
+      capability,
+      parent: activeCommitContext.getStore() ?? null,
+    };
+    try {
+      return await activeCommitContext.run(context, commit);
+    } finally {
+      context.active = false;
+    }
   })();
   capability.commitTail = operation.then(
     () => undefined,
@@ -1488,9 +2038,24 @@ export function commitWithOperationLease(lease, commit) {
 
 function releaseOperationLease(lease) {
   const capability = requireLeaseCapability(lease);
+  for (
+    let commitContext = activeCommitContext.getStore() ?? null;
+    commitContext !== null;
+    commitContext = commitContext.parent
+  ) {
+    if (
+      commitContext.active === true &&
+      commitContext.capability === capability
+    ) {
+      return Promise.reject(lockError(
+        "LOCK_COMMIT_RELEASE_REENTRANT",
+        "an operation lease cannot be released from inside its active commit callback",
+      ));
+    }
+  }
   if (capability.releasePromise !== null) return capability.releasePromise;
-  capability.lifecycle = "releasing";
-  capability.releasePromise = (async () => {
+  if (capability.lifecycle === "active") capability.lifecycle = "releasing";
+  const releaseAttempt = (async () => {
     await capability.commitTail;
     try {
       await runStage(capability.options, "before-release", {
@@ -1525,7 +2090,16 @@ function releaseOperationLease(lease) {
       );
     }
   })();
-  return capability.releasePromise;
+  capability.releasePromise = releaseAttempt;
+  void releaseAttempt.catch(() => {
+    if (
+      capability.releasePromise === releaseAttempt &&
+      capability.lifecycle === "releasing"
+    ) {
+      capability.releasePromise = null;
+    }
+  });
+  return releaseAttempt;
 }
 
 function ownerRecord({
@@ -1584,22 +2158,16 @@ function validateCompactionThreshold(value) {
 
 async function cleanupCompactedChain({
   lockPath,
-  claims,
   durability,
+  options,
 }) {
-  const targets = new Set();
-  for (const claim of claims) {
-    if (claim.path !== lockPath) targets.add(claim.path);
-    targets.add(heartbeatFilePath(lockPath, claim.owner.nonce));
-    targets.add(releasePath(lockPath, claim.owner.nonce));
-  }
-
-  let changed = false;
   try {
-    for (const target of targets) {
-      changed = (await unlinkIfPresent(target)) || changed;
-    }
-    if (changed) await durability.syncDirectory(dirname(lockPath));
+    await cleanupUnreachableFinalArtifacts({
+      lockPath,
+      parentPath: dirname(lockPath),
+      durability,
+      options,
+    });
   } catch (error) {
     throw lockError(
       "LOCK_COMPACTION_CLEANUP_FAILED",
@@ -1669,8 +2237,8 @@ async function compactOwnershipChain({
     checkpointClaim = attachPredecessorClaim(confirmed, null);
     await cleanupCompactedChain({
       lockPath,
-      claims: chain.claims,
       durability,
+      options,
     });
     await runStage(options, "after-compact-cleanup", { checkpointClaim });
     await assertClaimOwned(lockPath, checkpointClaim);
@@ -1741,6 +2309,12 @@ export async function acquireOperationLock(options) {
 
   const parentPath = dirname(lockPath);
   await prepareTrustedParent({ stateRoot, parentPath, durability });
+  await cleanupOrphanQuarantines({
+    lockPath,
+    parentPath,
+    readProcessIdentity,
+    durability,
+  });
   await cleanupProvenDeadStaging({
     lockPath,
     parentPath,
@@ -1759,6 +2333,12 @@ export async function acquireOperationLock(options) {
     lockPath,
     parentPath,
     readProcessIdentity,
+    durability,
+    options,
+  });
+  await cleanupUnreachableFinalArtifacts({
+    lockPath,
+    parentPath,
     durability,
     options,
   });
@@ -1892,6 +2472,14 @@ export async function acquireOperationLock(options) {
       } catch (error) {
         if (error instanceof HandledAcquireFailure) throw error.error;
         if (!published) throw error;
+        const publicationError =
+          error instanceof OperationLockError &&
+          error.code === "LOCK_DISAPPEARED"
+            ? notOwnedError(
+                "published owner claim became unreachable before lease creation",
+                { cause: error, definitive: true },
+              )
+            : error;
         try {
           await publishReleaseMarker({
             lockPath,
@@ -1905,10 +2493,10 @@ export async function acquireOperationLock(options) {
           throw aggregateLockErrors(
             "LOCK_ACQUIRE_ROLLBACK_FAILED",
             "claim publication failed and nonce-bound rollback also failed",
-            [error, rollbackError],
+            [publicationError, rollbackError],
           );
         }
-        throw error;
+        throw publicationError;
       }
     } finally {
       if (stagingMetadata !== undefined && !keepStaging) {

@@ -159,6 +159,43 @@ async function runNodeChild(source) {
   return { ...result, stderr };
 }
 
+async function operationArtifactSummary(lockPath) {
+  const parentPath = dirname(lockPath);
+  const names = (await readdir(parentPath)).filter((name) =>
+    name.startsWith(basename(lockPath)));
+  const reachable = new Set();
+  if (!(await exists(lockPath))) return { extras: names, names, reachable };
+
+  let path = lockPath;
+  while (true) {
+    const owner = JSON.parse(await readFile(path, "utf8"));
+    reachable.add(basename(path));
+    for (const related of [
+      heartbeatPath(lockPath, owner.nonce),
+      releasePath(lockPath, owner.nonce),
+    ]) {
+      if (await exists(related)) reachable.add(basename(related));
+    }
+    const nextPath = successorPath(lockPath, owner.nonce);
+    if (!(await exists(nextPath))) break;
+    path = nextPath;
+  }
+  return {
+    extras: names.filter((name) => !reachable.has(name)),
+    names,
+    reachable,
+  };
+}
+
+async function assertOnlyReachableArtifacts(lockPath, upperBound) {
+  const summary = await operationArtifactSummary(lockPath);
+  assert.deepEqual(summary.extras, [], `unreachable artifacts: ${summary.extras}`);
+  assert.ok(
+    summary.names.length <= upperBound,
+    `found ${summary.names.length} operation.lock artifacts, expected <= ${upperBound}`,
+  );
+}
+
 test("a live owner is never stolen even with a stale heartbeat", async (t) => {
   const { lockPath } = await fixture(t);
   const stale = ownerRecord({ heartbeat: "2000-01-01T00:00:00.000Z" });
@@ -374,6 +411,32 @@ test("release surfaces corruption instead of treating it as benign ownership los
       assert.equal(error.cause.cause.code, "LOCK_MALFORMED");
       return true;
     },
+  );
+});
+
+test("startup preserves a misbound release marker for a reachable claim", async (t) => {
+  const { lockPath } = await fixture(t);
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath));
+  const malformed = {
+    schemaVersion: 2,
+    nonce: lease.nonce,
+    pid: lease.owner.pid,
+    startedAt: lease.owner.startedAt,
+    claim: { dev: "wrong-device", ino: "wrong-inode" },
+    releasedAt: "2026-07-17T01:04:00.000Z",
+  };
+  await writePrivateJson(releasePath(lockPath, lease.nonce), malformed);
+
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      identity: OWNER,
+      readProcessIdentity: async () => null,
+    })),
+    (error) => error.code === "LOCK_RELEASE_MALFORMED",
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(releasePath(lockPath, lease.nonce), "utf8")),
+    malformed,
   );
 });
 
@@ -1072,6 +1135,133 @@ test("release drains every commit accepted before release started", async (t) =>
   assert.deepEqual(order, ["first", "second", "release"]);
 });
 
+test("a transient pre-publication release failure is retryable without reopening commits", async (t) => {
+  const { lockPath } = await fixture(t);
+  const { commitWithOperationLease } = await import("../src/operation-lock.mjs");
+  const releaseEntered = deferred();
+  const allowFailure = deferred();
+  const transient = new Error("temporary release publication outage");
+  let attempts = 0;
+  let repaired = false;
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath, {
+    testHooks: {
+      "before-release": async () => {
+        attempts += 1;
+        if (repaired) return;
+        releaseEntered.resolve();
+        await allowFailure.promise;
+        throw transient;
+      },
+    },
+  }));
+
+  const first = lease.release();
+  const duplicate = lease.release();
+  await releaseEntered.promise;
+  assert.equal(attempts, 1, "pending release calls must share one attempt");
+  allowFailure.resolve();
+  const failed = await Promise.allSettled([first, duplicate]);
+  assert.deepEqual(failed.map(({ status }) => status), ["rejected", "rejected"]);
+  assert.equal(failed[0].reason.cause, transient);
+  assert.equal(failed[1].reason, failed[0].reason);
+
+  assert.throws(
+    () => commitWithOperationLease(lease, async () => {}),
+    (error) => error.code === "LOCK_NOT_OWNED",
+  );
+  repaired = true;
+  assert.equal(await lease.release(), true);
+  assert.equal(attempts, 2);
+  assert.equal(await exists(releasePath(lockPath, lease.nonce)), true);
+});
+
+test("a release retry completes idempotently when the marker already exists", async (t) => {
+  const { lockPath } = await fixture(t);
+  const transient = new Error("response lost after release publication");
+  let lease;
+  let failOnce = true;
+  lease = await acquireOperationLock(acquisitionOptions(lockPath, {
+    testHooks: {
+      "before-release": async ({ claim }) => {
+        if (!failOnce) return;
+        failOnce = false;
+        await writePrivateJson(releasePath(lockPath, claim.owner.nonce), {
+          schemaVersion: 2,
+          nonce: claim.owner.nonce,
+          pid: claim.owner.pid,
+          startedAt: claim.owner.startedAt,
+          claim: {
+            dev: String(claim.metadata.dev),
+            ino: String(claim.metadata.ino),
+          },
+          releasedAt: "2026-07-17T11:00:00.000Z",
+        });
+        throw transient;
+      },
+    },
+  }));
+
+  await assert.rejects(
+    lease.release(),
+    (error) => error.code === "LOCK_RELEASE_FAILED" && error.cause === transient,
+  );
+  assert.equal(await lease.release(), false);
+  assert.equal(await exists(releasePath(lockPath, lease.nonce)), true);
+});
+
+test("release from inside the active commit callback fails immediately", async (t) => {
+  const { lockPath } = await fixture(t);
+  const { commitWithOperationLease } = await import("../src/operation-lock.mjs");
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath));
+
+  const operation = commitWithOperationLease(lease, async () => lease.release());
+  const outcome = await Promise.race([
+    operation.then(
+      (value) => ({ status: "fulfilled", value }),
+      (reason) => ({ reason, status: "rejected" }),
+    ),
+    new Promise((resolve) => setTimeout(
+      () => resolve({ status: "timeout" }),
+      100,
+    )),
+  ]);
+
+  assert.notEqual(outcome.status, "timeout", "commit callback release deadlocked");
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.reason.code, "LOCK_COMMIT_RELEASE_REENTRANT");
+  assert.equal(await lease.release(), true);
+});
+
+test("release rejects through nested commit contexts instead of deadlocking", async (t) => {
+  const firstFixture = await fixture(t);
+  const secondFixture = await fixture(t);
+  const { commitWithOperationLease } = await import("../src/operation-lock.mjs");
+  const first = await acquireOperationLock(acquisitionOptions(firstFixture.lockPath));
+  const second = await acquireOperationLock(acquisitionOptions(
+    secondFixture.lockPath,
+    { identity: OWNER },
+  ));
+
+  const operation = commitWithOperationLease(first, async () =>
+    commitWithOperationLease(second, async () => first.release()));
+  const outcome = await Promise.race([
+    operation.then(
+      (value) => ({ status: "fulfilled", value }),
+      (reason) => ({ reason, status: "rejected" }),
+    ),
+    new Promise((resolve) => setTimeout(
+      () => resolve({ status: "timeout" }),
+      100,
+    )),
+  ]);
+
+  assert.notEqual(outcome.status, "timeout", "nested commit release deadlocked");
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.reason.code, "LOCK_COMMIT_RELEASE_REENTRANT");
+  assert.equal(await first.release(), true);
+  assert.equal(await second.release(), true);
+});
+
 test("exclusive staging collisions never unlink a file this call did not create", async (t) => {
   const { lockPath } = await fixture(t);
   const sentinel = "foreign staging file\n";
@@ -1154,6 +1344,27 @@ test("startup conservatively collects strict dead checkpoint and release staging
   assert.equal(await exists(racingCheckpoint), true);
 });
 
+test("startup collects an inactive quarantine left by this long-lived process", async (t) => {
+  const { lockPath } = await fixture(t);
+  await mkdir(dirname(lockPath), { mode: 0o700 });
+  const quarantinePath = join(
+    dirname(lockPath),
+    `.operation-lock-gc.${process.pid}.inactive-same-process`,
+  );
+  await mkdir(quarantinePath, { mode: 0o700 });
+  await writePrivateJson(
+    join(quarantinePath, "artifact"),
+    ownerRecord({
+      identity: { pid: process.pid, startedAt: "inactive" },
+      nonce: "inactive-same-process",
+    }),
+  );
+
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath));
+  await lease.release();
+  assert.equal(await exists(quarantinePath), false);
+});
+
 test("artifact cleanup never unlinks a replacement with a different inode", async (t) => {
   const { lockPath } = await fixture(t);
   const dead = { pid: 92_001, startedAt: "2026-07-17T10:00:00.000Z" };
@@ -1225,6 +1436,322 @@ test("hard-exit checkpoint crashes remain bounded across recovery loops", {
   const allArtifacts = (await readdir(dirname(lockPath))).filter((name) =>
     name.startsWith(basename(lockPath)));
   assert.ok(allArtifacts.length <= 8, `found ${allArtifacts.length} lock artifacts`);
+  assert.equal(
+    (await readdir(dirname(lockPath))).some((name) =>
+      name.startsWith(".operation-lock-gc.")),
+    false,
+  );
+});
+
+test("post-publication checkpoint hard exits keep every complete artifact class bounded", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const moduleUrl = new URL("../src/operation-lock.mjs", import.meta.url).href;
+  for (const stage of ["after-compact-rename", "after-compact-sync"]) {
+    await t.test(stage, async (subtest) => {
+      const { lockPath } = await fixture(subtest);
+      const initial = await acquireOperationLock(acquisitionOptions(lockPath));
+      await initial.release();
+
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        const childSource = `
+          const { acquireOperationLock } = await import(${JSON.stringify(moduleUrl)});
+          await acquireOperationLock({
+            lockPath: ${JSON.stringify(lockPath)},
+            stateRoot: ${JSON.stringify(dirname(lockPath))},
+            operation: "child-crash",
+            identity: { pid: process.pid, startedAt: ${JSON.stringify(stage)} + "-" + ${iteration} + "-" + process.pid },
+            readProcessIdentity: async () => null,
+            compactionThreshold: 2,
+            testHooks: {
+              ${JSON.stringify(stage)}: async () => process.exit(73),
+            },
+          });
+          process.exit(0);
+        `;
+        const child = await runNodeChild(childSource);
+        assert.equal(child.signal, null, child.stderr);
+        assert.equal(child.code, 73, child.stderr);
+
+        const quarantinePath = join(
+          dirname(lockPath),
+          `.operation-lock-gc.${93_000 + iteration}.legacy-${iteration}`,
+        );
+        await mkdir(quarantinePath, { mode: 0o700 });
+        await writePrivateJson(
+          join(quarantinePath, "artifact"),
+          ownerRecord({
+            identity: {
+              pid: 93_000 + iteration,
+              startedAt: `legacy-${iteration}`,
+            },
+            nonce: `legacy-${iteration}`,
+          }),
+        );
+
+        const recovery = await acquireOperationLock(acquisitionOptions(lockPath, {
+          compactionThreshold: 2,
+          identity: {
+            pid: 94_000 + iteration,
+            startedAt: `${stage}-recovery-${iteration}`,
+          },
+          readProcessIdentity: async () => null,
+        }));
+        await recovery.release();
+        await assertOnlyReachableArtifacts(lockPath, 3);
+        assert.equal(await exists(quarantinePath), false);
+      }
+    });
+  }
+});
+
+test("handled checkpoint publication faults keep complete artifacts bounded", async (t) => {
+  for (const stage of ["after-compact-rename", "after-compact-sync"]) {
+    await t.test(stage, async (subtest) => {
+      const { lockPath } = await fixture(subtest);
+      const initial = await acquireOperationLock(acquisitionOptions(lockPath));
+      await initial.release();
+
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        await assert.rejects(
+          acquireOperationLock(acquisitionOptions(lockPath, {
+            compactionThreshold: 2,
+            faultAt: stage,
+            identity: {
+              pid: 95_000 + iteration,
+              startedAt: `${stage}-fault-${iteration}`,
+            },
+          })),
+          (error) => error.code === `FAULT_${stage.toUpperCase().replaceAll("-", "_")}`,
+        );
+        const recovery = await acquireOperationLock(acquisitionOptions(lockPath, {
+          compactionThreshold: 2,
+          identity: {
+            pid: 96_000 + iteration,
+            startedAt: `${stage}-handled-recovery-${iteration}`,
+          },
+        }));
+        await recovery.release();
+        await assertOnlyReachableArtifacts(lockPath, 3);
+      }
+    });
+  }
+});
+
+test("final artifact collection preserves a racing inode replacement", async (t) => {
+  const { lockPath } = await fixture(t);
+  const initial = await acquireOperationLock(acquisitionOptions(lockPath));
+  await initial.release();
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      compactionThreshold: 2,
+      faultAt: "after-compact-rename",
+    })),
+    (error) => error.code === "FAULT_AFTER_COMPACT_RENAME",
+  );
+  const candidatePath = successorPath(lockPath, initial.nonce);
+  assert.equal(await exists(candidatePath), true);
+  const replacement = ownerRecord({
+    identity: { pid: 97_001, startedAt: "replacement" },
+    nonce: "replacement-final",
+    predecessor: {
+      dev: "replacement-device",
+      ino: "replacement-inode",
+      nonce: initial.nonce,
+    },
+  });
+
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      testHooks: {
+        "before-artifact-tombstone": async ({ path }) => {
+          if (path !== candidatePath) return;
+          await unlink(path);
+          await writePrivateJson(path, replacement);
+        },
+      },
+    })),
+    (error) => error.code === "LOCK_ARTIFACT_CHANGED",
+  );
+  assert.deepEqual(JSON.parse(await readFile(candidatePath, "utf8")), replacement);
+});
+
+test("a failed post-tombstone reachability check restores the exact candidate", async (t) => {
+  const { lockPath } = await fixture(t);
+  const initial = await acquireOperationLock(acquisitionOptions(lockPath));
+  await initial.release();
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      compactionThreshold: 2,
+      faultAt: "after-compact-rename",
+    })),
+    (error) => error.code === "FAULT_AFTER_COMPACT_RENAME",
+  );
+  const candidatePath = successorPath(lockPath, initial.nonce);
+  const candidate = await readFile(candidatePath, "utf8");
+
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      testHooks: {
+        "after-artifact-tombstone": async ({ path }) => {
+          if (path === candidatePath) {
+            await writeFile(lockPath, "{corrupt", { mode: 0o600 });
+          }
+        },
+      },
+    })),
+    (error) => error.code === "LOCK_MALFORMED",
+  );
+  assert.equal(await readFile(candidatePath, "utf8"), candidate);
+});
+
+test("orphan quarantine recovery restores an artifact that became reachable before a collector crash", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const { lockPath } = await fixture(t);
+  const current = await acquireOperationLock(acquisitionOptions(lockPath));
+  await current.release();
+  const savedRootPath = join(dirname(lockPath), "saved-root");
+  const savedRoot = ownerRecord({
+    identity: { pid: 98_001, startedAt: "saved-root" },
+    nonce: "saved-root",
+  });
+  await writePrivateJson(savedRootPath, savedRoot);
+  const savedMetadata = await stat(savedRootPath);
+  const candidatePath = successorPath(lockPath, savedRoot.nonce);
+  const candidate = ownerRecord({
+    identity: { pid: 98_002, startedAt: "saved-successor" },
+    nonce: "saved-successor",
+    predecessor: {
+      dev: String(savedMetadata.dev),
+      ino: String(savedMetadata.ino),
+      nonce: savedRoot.nonce,
+    },
+  });
+  await writePrivateJson(candidatePath, candidate);
+  const moduleUrl = new URL("../src/operation-lock.mjs", import.meta.url).href;
+  const childSource = `
+    const { rename } = await import("node:fs/promises");
+    const { acquireOperationLock } = await import(${JSON.stringify(moduleUrl)});
+    await acquireOperationLock({
+      lockPath: ${JSON.stringify(lockPath)},
+      stateRoot: ${JSON.stringify(dirname(lockPath))},
+      operation: "collector-crash",
+      identity: { pid: process.pid, startedAt: "collector-" + process.pid },
+      readProcessIdentity: async () => null,
+      testHooks: {
+        "before-artifact-tombstone": async ({ path }) => {
+          if (path === ${JSON.stringify(candidatePath)}) {
+            await rename(${JSON.stringify(savedRootPath)}, ${JSON.stringify(lockPath)});
+          }
+        },
+        "after-artifact-tombstone": async ({ path }) => {
+          if (path === ${JSON.stringify(candidatePath)}) process.exit(74);
+        },
+      },
+    });
+    process.exit(0);
+  `;
+  const child = await runNodeChild(childSource);
+  assert.equal(child.signal, null, child.stderr);
+  assert.equal(child.code, 74, child.stderr);
+  assert.equal(await exists(candidatePath), false);
+  assert.equal(
+    (await readdir(dirname(lockPath))).some((name) =>
+      name.startsWith(".operation-lock-gc.")),
+    true,
+  );
+
+  const savedRootRaw = await readFile(lockPath, "utf8");
+  await writeFile(lockPath, "{transient-corruption", { mode: 0o600 });
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      identity: { pid: 98_004, startedAt: "failed-race-recovery" },
+      readProcessIdentity: async () => null,
+    })),
+    (error) => error.code === "LOCK_MALFORMED",
+  );
+  assert.deepEqual(JSON.parse(await readFile(candidatePath, "utf8")), candidate);
+  await writeFile(lockPath, savedRootRaw, { mode: 0o600 });
+
+  const recovery = await acquireOperationLock(acquisitionOptions(lockPath, {
+    identity: { pid: 98_003, startedAt: "race-recovery" },
+    readProcessIdentity: async () => null,
+  }));
+  await recovery.release();
+  assert.deepEqual(JSON.parse(await readFile(candidatePath, "utf8")), candidate);
+  assert.equal(
+    (await readdir(dirname(lockPath))).some((name) =>
+      name.startsWith(".operation-lock-gc.")),
+    false,
+  );
+});
+
+test("orphan quarantine recovery restores a racing replacement after the collector crashes", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const { lockPath } = await fixture(t);
+  const current = await acquireOperationLock(acquisitionOptions(lockPath));
+  await current.release();
+  const savedRootPath = join(dirname(lockPath), "replacement-root");
+  const savedRoot = ownerRecord({
+    identity: { pid: 99_001, startedAt: "replacement-root" },
+    nonce: "replacement-root",
+  });
+  await writePrivateJson(savedRootPath, savedRoot);
+  const savedMetadata = await stat(savedRootPath);
+  const candidatePath = successorPath(lockPath, savedRoot.nonce);
+  const predecessor = {
+    dev: String(savedMetadata.dev),
+    ino: String(savedMetadata.ino),
+    nonce: savedRoot.nonce,
+  };
+  await writePrivateJson(candidatePath, ownerRecord({
+    identity: { pid: 99_002, startedAt: "old-candidate" },
+    nonce: "old-candidate",
+    predecessor,
+  }));
+  const replacement = ownerRecord({
+    identity: { pid: 99_003, startedAt: "racing-replacement" },
+    nonce: "racing-replacement",
+    predecessor,
+  });
+  const moduleUrl = new URL("../src/operation-lock.mjs", import.meta.url).href;
+  const childSource = `
+    const { chmod, rename, unlink, writeFile } = await import("node:fs/promises");
+    const { acquireOperationLock } = await import(${JSON.stringify(moduleUrl)});
+    await acquireOperationLock({
+      lockPath: ${JSON.stringify(lockPath)},
+      stateRoot: ${JSON.stringify(dirname(lockPath))},
+      operation: "replacement-crash",
+      identity: { pid: process.pid, startedAt: "replacement-collector-" + process.pid },
+      readProcessIdentity: async () => null,
+      testHooks: {
+        "before-artifact-tombstone": async ({ path }) => {
+          if (path !== ${JSON.stringify(candidatePath)}) return;
+          await unlink(path);
+          await writeFile(path, ${JSON.stringify(`${JSON.stringify(replacement)}\n`)}, { mode: 0o600 });
+          await chmod(path, 0o600);
+          await rename(${JSON.stringify(savedRootPath)}, ${JSON.stringify(lockPath)});
+        },
+        "after-artifact-tombstone": async ({ path }) => {
+          if (path === ${JSON.stringify(candidatePath)}) process.exit(75);
+        },
+      },
+    });
+    process.exit(0);
+  `;
+  const child = await runNodeChild(childSource);
+  assert.equal(child.signal, null, child.stderr);
+  assert.equal(child.code, 75, child.stderr);
+  assert.equal(await exists(candidatePath), false);
+
+  const recovery = await acquireOperationLock(acquisitionOptions(lockPath, {
+    identity: { pid: 99_004, startedAt: "replacement-recovery" },
+    readProcessIdentity: async () => null,
+  }));
+  await recovery.release();
+  assert.deepEqual(JSON.parse(await readFile(candidatePath, "utf8")), replacement);
   assert.equal(
     (await readdir(dirname(lockPath))).some((name) =>
       name.startsWith(".operation-lock-gc.")),
