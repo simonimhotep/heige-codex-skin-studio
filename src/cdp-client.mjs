@@ -5,6 +5,9 @@ const DEFAULT_POLL_MS = 100;
 const DEFAULT_COMMAND_TIMEOUT_MS = 5000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 5000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 5000;
+const MAX_DISCOVERY_BODY_BYTES = 1024 * 1024;
+const MAX_DISCOVERY_TARGETS = 256;
+const MAX_CDP_MESSAGE_BYTES = 1024 * 1024;
 
 function validatePort(port) {
   if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) {
@@ -28,7 +31,7 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function parseLoopbackWebSocketUrl(value) {
+function parseLoopbackWebSocketUrl(value, expectedPort = null) {
   if (typeof value !== "string" || value.length === 0 || value !== value.trim()) {
     throw new TypeError("webSocketDebuggerUrl must be a non-empty URL string");
   }
@@ -48,18 +51,23 @@ function parseLoopbackWebSocketUrl(value) {
     parsed.username ||
     parsed.password ||
     parsed.hash ||
-    !parsed.port
+    parsed.search ||
+    !parsed.port ||
+    !/^\/devtools\/page\/[A-Za-z0-9_-]{1,256}$/.test(parsed.pathname)
   ) {
     throw new TypeError(
-      "webSocketDebuggerUrl must use ws://127.0.0.1 with an explicit port",
+      "webSocketDebuggerUrl must use ws://127.0.0.1 with an explicit port and /devtools/page target",
     );
   }
 
-  validatePort(Number(parsed.port));
+  const port = validatePort(Number(parsed.port));
+  if (expectedPort !== null && port !== expectedPort) {
+    throw new TypeError("webSocketDebuggerUrl must use the verified CDP discovery port");
+  }
   return parsed;
 }
 
-function isRendererTarget(target) {
+function isRendererTarget(target, expectedPort) {
   if (
     target === null ||
     typeof target !== "object" ||
@@ -71,7 +79,7 @@ function isRendererTarget(target) {
   }
 
   try {
-    parseLoopbackWebSocketUrl(target.webSocketDebuggerUrl);
+    parseLoopbackWebSocketUrl(target.webSocketDebuggerUrl, expectedPort);
     return true;
   } catch {
     return false;
@@ -166,11 +174,57 @@ function buildEvaluationError(exceptionDetails) {
   return error;
 }
 
-export function filterRendererTargets(targets) {
+export function filterRendererTargets(targets, { expectedPort = null } = {}) {
   if (!Array.isArray(targets)) {
     throw new TypeError("renderer targets must be an array");
   }
-  return targets.filter(isRendererTarget).sort(compareTargets);
+  if (expectedPort !== null) validatePort(expectedPort);
+  if (targets.length > MAX_DISCOVERY_TARGETS) {
+    throw new RangeError(`renderer target discovery returned more than ${MAX_DISCOVERY_TARGETS} targets`);
+  }
+  return targets.filter((target) => isRendererTarget(target, expectedPort)).sort(compareTargets);
+}
+
+async function readDiscoveryJson(response) {
+  if (response?.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!(value instanceof Uint8Array)) {
+          throw new TypeError("renderer discovery body emitted a non-byte chunk");
+        }
+        total += value.byteLength;
+        if (total > MAX_DISCOVERY_BODY_BYTES) {
+          await reader.cancel().catch(() => {});
+          throw new RangeError(
+            `renderer discovery body is larger than ${MAX_DISCOVERY_BODY_BYTES} bytes`,
+          );
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+    const bytes = Buffer.concat(chunks, total);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text);
+  }
+  if (typeof response?.json !== "function") {
+    throw new Error("malformed renderer target response: missing bounded body or JSON reader");
+  }
+  const value = await response.json();
+  let encoded;
+  try { encoded = JSON.stringify(value); } catch (cause) {
+    throw new Error("renderer discovery JSON cannot be serialized", { cause });
+  }
+  if (typeof encoded !== "string" || Buffer.byteLength(encoded) > MAX_DISCOVERY_BODY_BYTES) {
+    throw new RangeError(`renderer discovery body is larger than ${MAX_DISCOVERY_BODY_BYTES} bytes`);
+  }
+  return value;
 }
 
 export async function fetchRendererTargets(
@@ -212,13 +266,9 @@ export async function fetchRendererTargets(
   if (response === null || typeof response !== "object" || response.ok !== true) {
     throw buildHttpError(response);
   }
-  if (typeof response.json !== "function") {
-    throw new Error("malformed renderer target response: missing JSON body reader");
-  }
-
   let targets;
   try {
-    targets = await awaitBeforeDeadline(Promise.resolve(response.json()), {
+    targets = await awaitBeforeDeadline(Promise.resolve(readDiscoveryJson(response)), {
       deadline,
       timeoutMs,
       label: "renderer target discovery JSON",
@@ -234,7 +284,7 @@ export async function fetchRendererTargets(
     throw new Error("malformed renderer target JSON: expected an array");
   }
 
-  return filterRendererTargets(targets);
+  return filterRendererTargets(targets, { expectedPort: port });
 }
 
 export async function waitForRendererTargets(
@@ -470,6 +520,14 @@ export class CdpSession {
   handleMessage(event) {
     if (typeof event?.data !== "string") {
       this.terminate(new Error("received a non-text CDP WebSocket message"));
+      this.closeSocket();
+      return;
+    }
+    if (
+      event.data.length > MAX_CDP_MESSAGE_BYTES
+      || Buffer.byteLength(event.data) > MAX_CDP_MESSAGE_BYTES
+    ) {
+      this.terminate(new RangeError(`received CDP message larger than ${MAX_CDP_MESSAGE_BYTES} bytes`));
       this.closeSocket();
       return;
     }

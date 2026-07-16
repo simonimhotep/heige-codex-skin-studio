@@ -69,6 +69,10 @@ class FakeWebSocket {
     this.onmessage?.({ data: JSON.stringify({ id, error }) });
   }
 
+  respondRaw(data) {
+    this.onmessage?.({ data });
+  }
+
   emitError(error) {
     this.onerror?.({ error, message: error.message, type: "error" });
   }
@@ -150,6 +154,52 @@ test("fetches renderer targets only from the fixed IPv4 loopback endpoint", asyn
   assert.equal(calls[0][1].redirect, "error");
   assert.ok(calls[0][1].signal instanceof AbortSignal);
   assert.deepEqual(targets.map(({ id }) => id), ["target-a"]);
+});
+
+test("discovery accepts only page sockets on the same verified CDP port", async () => {
+  const targets = await fetchRendererTargets(9341, {
+    fetchImpl: async () => okResponse([
+      rendererTarget(),
+      rendererTarget({
+        id: "other-port",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9444/devtools/page/other-port",
+      }),
+      rendererTarget({
+        id: "browser-socket",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/browser/browser-a",
+      }),
+      rendererTarget({
+        id: "query-socket",
+        webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/query?redirect=1",
+      }),
+    ]),
+  });
+  assert.deepEqual(targets.map(({ id }) => id), ["target-a"]);
+});
+
+test("discovery rejects oversized streamed bodies and target floods", async () => {
+  const oversized = new Uint8Array(1024 * 1024 + 1);
+  oversized.fill(0x20);
+  await assert.rejects(fetchRendererTargets(9341, {
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(oversized);
+          controller.close();
+        },
+      }),
+    }),
+  }), /discovery.*body.*large|1048576/i);
+
+  await assert.rejects(fetchRendererTargets(9341, {
+    fetchImpl: async () => okResponse(Array.from({ length: 257 }, (_, index) => rendererTarget({
+      id: `target-${index}`,
+      webSocketDebuggerUrl: `ws://127.0.0.1:9341/devtools/page/target-${index}`,
+    }))),
+  }), /target.*256|too many/i);
 });
 
 test("renderer discovery times out a fetch that never settles", async () => {
@@ -279,6 +329,10 @@ test("CdpSession refuses non-loopback debugger sockets", () => {
   assert.throws(
     () => new CdpSession("ws://192.0.2.10:9341/devtools/page/remote"),
     /127\.0\.0\.1/,
+  );
+  assert.throws(
+    () => new CdpSession("ws://127.0.0.1:9341/devtools/browser/browser-a"),
+    /devtools.*page/i,
   );
 });
 
@@ -414,6 +468,14 @@ test("socket errors reject every pending command", async () => {
   socket.emitError(new Error("socket exploded"));
 
   await assert.rejects(command, /socket exploded/i);
+});
+
+test("an oversized CDP message closes the session before JSON parsing", async () => {
+  const { session, socket } = await openFakeSession();
+  const command = session.send("Runtime.getIsolateId");
+  socket.respondRaw(" ".repeat(1024 * 1024 + 1));
+  await assert.rejects(command, /message.*1048576|message.*large/i);
+  assert.equal(socket.closeCalls, 1);
 });
 
 test("close is idempotent", async () => {
