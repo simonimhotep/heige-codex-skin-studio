@@ -39,12 +39,22 @@ const PARTICIPANT_KEYS = [
   "beforeKind",
   "beforeLegacyCommit",
   "beforeManifestSha256",
+  "intentPath",
   "product",
   "schemaVersion",
   "stagePath",
   "targetRoot",
   "transactionId",
   "unchanged",
+];
+const PREPARATION_INTENT_KEYS = [
+  "backupPath",
+  "operation",
+  "product",
+  "schemaVersion",
+  "stagePath",
+  "targetRoot",
+  "transactionId",
 ];
 const JOURNAL_KEYS = [
   "createdAt",
@@ -522,6 +532,7 @@ async function stageSourceTree({ sourceRoot, sourceIdentity, stagePath, hooks = 
   await mkdir(stagePath, { mode: 0o755 });
   await chmod(stagePath, 0o755);
   await syncDirectory(dirname(stagePath));
+  await hooks.afterStageCreated?.({ stagePath });
   const entries = [];
   const budget = {
     totalBytes: 0,
@@ -606,7 +617,12 @@ function assertParticipant(value) {
   }
   const stagePath = `${targetRoot}.staged.${value.transactionId}`;
   const backupPath = `${targetRoot}.backup.${value.transactionId}`;
-  if (value.stagePath !== stagePath || value.backupPath !== backupPath) {
+  const intentPath = preparationIntentPathFor(targetRoot);
+  if (
+    value.stagePath !== stagePath
+    || value.backupPath !== backupPath
+    || value.intentPath !== intentPath
+  ) {
     throw new Error("participant paths are not derived from its canonical target and transaction id");
   }
   if (typeof value.beforeExisted !== "boolean" || typeof value.unchanged !== "boolean") {
@@ -643,8 +659,167 @@ function journalPathFor(targetRoot) {
   return `${targetRoot}.install-journal.json`;
 }
 
+function preparationIntentPathFor(targetRoot) {
+  return `${targetRoot}.install-prepare.json`;
+}
+
 function lockPathFor(targetRoot) {
   return `${targetRoot}.install.lock`;
+}
+
+function assertPreparationIntent(value, targetRoot = value?.targetRoot) {
+  if (
+    value === null
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || !exactKeys(value, PREPARATION_INTENT_KEYS)
+    || value.schemaVersion !== 1
+    || value.product !== INSTALL_PRODUCT
+    || value.operation !== "prepare-install-tree"
+    || typeof value.transactionId !== "string"
+    || !UUID_PATTERN.test(value.transactionId)
+  ) throw new Error("install tree preparation intent schema is invalid");
+  targetRoot = assertAbsolutePath(targetRoot, "preparation intent targetRoot");
+  if (
+    value.targetRoot !== targetRoot
+    || value.stagePath !== `${targetRoot}.staged.${value.transactionId}`
+    || value.backupPath !== `${targetRoot}.backup.${value.transactionId}`
+  ) throw new Error("install tree preparation intent paths are invalid");
+  return value;
+}
+
+async function readPreparationIntent(targetRoot) {
+  const intentPath = preparationIntentPathFor(targetRoot);
+  const info = await pathInfo(intentPath);
+  if (info === null) return null;
+  if (info.isSymbolicLink() || !info.isFile() || !modeMatches(info, 0o600)) {
+    throw new Error("install tree preparation intent is not a mode 0600 regular file");
+  }
+  const bytes = (await readStableFile(intentPath, "install tree preparation intent", {
+    maxBytes: MAX_JOURNAL_BYTES,
+  })).bytes;
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (cause) {
+    throw new Error("install tree preparation intent JSON is invalid", { cause });
+  }
+  if (text !== `${JSON.stringify(value)}\n`) {
+    throw new Error("install tree preparation intent JSON is not canonical");
+  }
+  return assertPreparationIntent(value, targetRoot);
+}
+
+async function createPreparationIntent(targetRoot, transactionId) {
+  const value = assertPreparationIntent({
+    schemaVersion: 1,
+    product: INSTALL_PRODUCT,
+    operation: "prepare-install-tree",
+    transactionId,
+    targetRoot,
+    stagePath: `${targetRoot}.staged.${transactionId}`,
+    backupPath: `${targetRoot}.backup.${transactionId}`,
+  }, targetRoot);
+  await writeDurableBytes(
+    preparationIntentPathFor(targetRoot),
+    Buffer.from(`${JSON.stringify(value)}\n`),
+    { exclusive: true, mode: 0o600 },
+  );
+  return value;
+}
+
+async function clearPreparationIntent(targetRoot, expectedTransactionId) {
+  const intent = await readPreparationIntent(targetRoot);
+  if (intent === null) return false;
+  if (intent.transactionId !== expectedTransactionId) {
+    throw new Error("install tree preparation intent transaction changed before cleanup");
+  }
+  await unlink(preparationIntentPathFor(targetRoot));
+  await syncDirectory(dirname(targetRoot));
+  return true;
+}
+
+async function validatePartialStageDirectory(root, relativePath, budget) {
+  const path = relativePath === "" ? root : join(root, relativePath);
+  const info = await lstat(path);
+  if (
+    info.isSymbolicLink()
+    || !info.isDirectory()
+    || (process.platform !== "win32" && (info.mode & 0o022) !== 0)
+  ) throw new Error(`partial install stage contains an unsafe directory: ${relativePath || "."}`);
+  const children = await readdir(path, { withFileTypes: true });
+  children.sort((left, right) => left.name.localeCompare(right.name, "en"));
+  for (const child of children) {
+    const childRelative = relativePath === "" ? child.name : join(relativePath, child.name);
+    const childPath = join(root, childRelative);
+    const childInfo = await lstat(childPath);
+    if (childInfo.isSymbolicLink()) {
+      throw new Error(`partial install stage contains a symlink: ${childRelative}`);
+    }
+    if (childInfo.isDirectory()) {
+      await validatePartialStageDirectory(root, childRelative, budget);
+      continue;
+    }
+    if (
+      !childInfo.isFile()
+      || childInfo.size > MAX_INSTALL_SOURCE_FILE_BYTES
+      || (process.platform !== "win32" && (childInfo.mode & 0o022) !== 0)
+    ) throw new Error(`partial install stage contains an unsafe file: ${childRelative}`);
+    reserveBudget(budget, BigInt(childInfo.size));
+  }
+}
+
+async function validatePartialPreparationStage(intent) {
+  const rootInfo = await lstat(intent.stagePath);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+    throw new Error("partial install stage is not a real directory");
+  }
+  if (!sameCanonicalPath(await realpath(intent.stagePath), intent.stagePath)) {
+    throw new Error("partial install stage is not canonical");
+  }
+  const topLevel = await readdir(intent.stagePath);
+  const allowed = new Map(SOURCE_ENTRIES.map((entry) => [entry.name, entry.type]));
+  allowed.set(INSTALL_MARKER_NAME, "file");
+  for (const name of topLevel) {
+    const expectedType = allowed.get(name);
+    if (expectedType === undefined) {
+      throw new Error(`partial install stage contains unexpected top-level content: ${name}`);
+    }
+    const info = await lstat(join(intent.stagePath, name));
+    if (
+      info.isSymbolicLink()
+      || (expectedType === "file" ? !info.isFile() : !info.isDirectory())
+    ) throw new Error(`partial install stage top-level type is invalid: ${name}`);
+  }
+  await validatePartialStageDirectory(intent.stagePath, "", {
+    totalBytes: 0,
+    maxBytes: MAX_INSTALL_SOURCE_TREE_BYTES + MAX_JOURNAL_BYTES,
+    label: "partial install stage",
+  });
+}
+
+async function recoverPreparationIntentUnderLock(targetRoot) {
+  const intent = await readPreparationIntent(targetRoot);
+  if (intent === null) return { recovered: false };
+  if (await pathInfo(intent.backupPath)) {
+    throw new Error("install preparation unexpectedly created a backup before publication");
+  }
+  if (await pathInfo(intent.stagePath)) {
+    if (await pathInfo(join(intent.stagePath, INSTALL_MARKER_NAME))) {
+      try {
+        await validateOwnedTree(intent.stagePath);
+      } catch {
+        await validatePartialPreparationStage(intent);
+      }
+    } else {
+      await validatePartialPreparationStage(intent);
+    }
+    await rm(intent.stagePath, { recursive: true, force: false });
+    await syncDirectory(dirname(targetRoot));
+  }
+  await clearPreparationIntent(targetRoot, intent.transactionId);
+  return { recovered: true, action: "prepare-cleanup" };
 }
 
 async function writeDurableBytes(path, bytes, { exclusive = false, mode = 0o600 } = {}) {
@@ -924,8 +1099,12 @@ export async function prepareInstallTree({
   if (!UUID_PATTERN.test(transactionId)) throw new Error("transaction id is invalid");
   const stagePath = `${targetRoot}.staged.${transactionId}`;
   const backupPath = `${targetRoot}.backup.${transactionId}`;
+  const intentPath = preparationIntentPathFor(targetRoot);
   if (await pathInfo(stagePath) || await pathInfo(backupPath)) {
     throw new Error("transaction stage or backup path already exists");
+  }
+  if (await pathInfo(intentPath)) {
+    throw new Error("an unfinished install tree preparation intent already exists");
   }
   const existing = await pathInfo(targetRoot);
   let before = null;
@@ -939,7 +1118,10 @@ export async function prepareInstallTree({
       beforeKind = "legacy";
     }
   }
+  let intent = null;
   try {
+    intent = await createPreparationIntent(targetRoot, transactionId);
+    await hooks.afterPreparationIntent?.({ intent });
     const afterManifestSha256 = await stageSourceTree({
       sourceRoot,
       sourceIdentity,
@@ -950,13 +1132,14 @@ export async function prepareInstallTree({
     if (unchanged) {
       await removeExactOwnedTree(stagePath, afterManifestSha256);
     }
-    return assertParticipant({
+    const participant = assertParticipant({
       schemaVersion: 1,
       product: INSTALL_PRODUCT,
       transactionId,
       targetRoot,
       stagePath,
       backupPath,
+      intentPath,
       beforeExisted: before !== null,
       beforeKind,
       beforeLegacyCommit: beforeKind === "legacy" ? before.commit : null,
@@ -964,9 +1147,25 @@ export async function prepareInstallTree({
       afterManifestSha256,
       unchanged,
     });
+    if (unchanged) await clearPreparationIntent(targetRoot, transactionId);
+    return participant;
   } catch (error) {
-    const staged = await pathInfo(stagePath);
-    if (staged !== null) await rm(stagePath, { recursive: true, force: true });
+    let cleanupError = null;
+    try {
+      if (intent !== null) {
+        await recoverPreparationIntentUnderLock(targetRoot);
+      } else if (await pathInfo(stagePath)) {
+        throw new Error("install stage appeared before its durable preparation intent");
+      }
+    } catch (failure) {
+      cleanupError = failure;
+    }
+    if (cleanupError !== null) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "install tree preparation and cleanup both failed",
+      );
+    }
     throw error;
   }
 }
@@ -998,7 +1197,10 @@ export async function publishInstallTree(value, { faultAt, onBoundary, testMode 
 
 export async function rollbackInstallTree(value, { testMode } = {}) {
   const participant = assertParticipant(value);
-  if (participant.unchanged) return { ...participant, rolledBack: false };
+  if (participant.unchanged) {
+    await clearPreparationIntent(participant.targetRoot, participant.transactionId);
+    return { ...participant, rolledBack: false };
+  }
   const parent = await ensureTargetParent(participant.targetRoot);
   const backup = await pathInfo(participant.backupPath);
   const target = await pathInfo(participant.targetRoot);
@@ -1026,12 +1228,16 @@ export async function rollbackInstallTree(value, { testMode } = {}) {
   } else if (await pathInfo(participant.targetRoot)) {
     throw new Error("rollback left a target that did not exist before the transaction");
   }
+  await clearPreparationIntent(participant.targetRoot, participant.transactionId);
   return { ...participant, rolledBack: true };
 }
 
 export async function finalizeInstallTree(value, { testMode } = {}) {
   const participant = assertParticipant(value);
-  if (participant.unchanged) return { ...participant, finalized: true };
+  if (participant.unchanged) {
+    await clearPreparationIntent(participant.targetRoot, participant.transactionId);
+    return { ...participant, finalized: true };
+  }
   await validateOwnedTree(participant.targetRoot, participant.afterManifestSha256);
   if (await pathInfo(participant.stagePath)) {
     await removeExactOwnedTree(participant.stagePath, participant.afterManifestSha256);
@@ -1040,12 +1246,13 @@ export async function finalizeInstallTree(value, { testMode } = {}) {
     if (!participant.beforeExisted) throw new Error("unexpected backup for absent prestate");
     await removeExactParticipantBeforeTree(participant, participant.backupPath, testMode);
   }
+  await clearPreparationIntent(participant.targetRoot, participant.transactionId);
   return { ...participant, finalized: true };
 }
 
 async function recoverJournalUnderLock(targetRoot, { testMode } = {}) {
   let journal = await readJournal(targetRoot);
-  if (journal === null) return { recovered: false };
+  if (journal === null) return recoverPreparationIntentUnderLock(targetRoot);
   if (journal.decision === "commit") {
     await finalizeInstallTree(journal.participant, { testMode });
     await clearJournal(targetRoot);
@@ -1100,6 +1307,7 @@ export async function installTree({
   try {
     const recovery = await recoverJournalUnderLock(targetRoot, { testMode });
     const participant = await prepareInstallTree({ sourceRoot, targetRoot, hooks, testMode });
+    await hooks.afterPrepare?.({ participant });
     if (participant.unchanged) {
       return {
         targetRoot: participant.targetRoot,

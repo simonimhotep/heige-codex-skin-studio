@@ -9,6 +9,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
+  acquireMacosLauncherInstallLock,
   finalizeMacosLauncher,
   installMacosLauncher,
   prepareMacosLauncher,
@@ -33,6 +34,19 @@ async function fixture(t, suffix = "用户 空格") {
   return { root, home, installRoot, entrypoint };
 }
 
+async function waitForPath(child, path, stderr) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      if (child.exitCode !== null) break;
+      await delay(10);
+    }
+  }
+  throw new Error(`child did not reach launcher prepare boundary: ${stderr()}`);
+}
+
 test("creates a Finder-visible local app that calls only the stable enable entrypoint", async (t) => {
   const { home, installRoot, entrypoint } = await fixture(t);
   const result = await installMacosLauncher({ home, installRoot });
@@ -48,6 +62,47 @@ test("creates a Finder-visible local app that calls only the stable enable entry
   assert.equal((await stat(result.executablePath)).mode & 0o777, 0o755);
   assert.equal((await stat(join(result.appPath, "Contents", "Info.plist"))).mode & 0o777, 0o644);
 });
+
+for (const hook of ["afterStageCreated", "afterPrepare"]) {
+  test(`SIGKILL at launcher ${hook} recovers its durable preparation intent`, async (t) => {
+    const { root, home, installRoot } = await fixture(t);
+    const markerPath = join(root, `${hook}.marker`);
+    const childScript = join(root, `${hook}.mjs`);
+    await writeFile(childScript, `
+import { writeFile } from "node:fs/promises";
+const { prepareMacosLauncher } = await import(${JSON.stringify(launcherModuleUrl)});
+await prepareMacosLauncher({
+  home: process.argv[2],
+  installRoot: process.argv[3],
+  hooks: { [process.argv[5]]: async () => {
+    await writeFile(process.argv[4], "ready\\n");
+    setInterval(() => {}, 1_000);
+    await new Promise(() => {});
+  } },
+});
+`);
+    const child = spawn(process.execPath, [childScript, home, installRoot, markerPath, hook], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    });
+    await waitForPath(child, markerPath, () => stderr);
+    const exited = once(child, "exit");
+    assert.equal(child.kill("SIGKILL"), true);
+    const [, signal] = await exited;
+    assert.equal(signal, "SIGKILL");
+
+    assert.equal((await lstat(join(home, ".heige-codex-skin-launcher-prepare.json"))).isFile(), true);
+    const lock = await acquireMacosLauncherInstallLock({ home });
+    await lock.release();
+    await assert.rejects(lstat(join(home, ".heige-codex-skin-launcher-prepare.json")), /ENOENT/);
+    await assert.rejects(lstat(join(home, "Applications")), /ENOENT/);
+  });
+}
 
 test("serializable launcher participant retains the old bundle until outer finalize", async (t) => {
   const { home, installRoot } = await fixture(t);

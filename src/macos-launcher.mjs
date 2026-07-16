@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -10,6 +11,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -22,6 +24,7 @@ const EXECUTABLE_NAME = "HeiGe Skin Launcher";
 const GENERATOR_ID = "heige-codex-skin-studio";
 const MAX_GENERATED_FILE_BYTES = 64 * 1024;
 const TRANSACTION_FILE = ".heige-codex-skin-launcher-transaction.json";
+const PREPARATION_FILE = ".heige-codex-skin-launcher-prepare.json";
 const LOCK_DIRECTORY = ".heige-codex-skin-launcher-install.lock";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PARTICIPANT_KEYS = [
@@ -29,12 +32,14 @@ const PARTICIPANT_KEYS = [
   "afterPlistSha256",
   "appPath",
   "applications",
+  "applicationsPriorExisted",
   "backupPath",
   "beforeExecutableSha256",
   "beforeExisted",
   "beforeInstallRoot",
   "beforePlistSha256",
   "home",
+  "intentPath",
   "installRoot",
   "product",
   "schemaVersion",
@@ -336,13 +341,18 @@ async function validateAttributedBundle(appPath, expected = null) {
   }
 }
 
-async function stageBundle(stagePath, expected) {
+async function stageBundle(stagePath, expected, hooks = {}) {
   const contents = join(stagePath, "Contents");
   const macos = join(contents, "MacOS");
   await mkdir(macos, { recursive: true, mode: 0o755 });
   await chmod(stagePath, 0o755);
   await chmod(contents, 0o755);
   await chmod(macos, 0o755);
+  await syncDirectory(macos);
+  await syncDirectory(contents);
+  await syncDirectory(stagePath);
+  await syncDirectory(dirname(stagePath));
+  await hooks.afterStageCreated?.({ stagePath });
   await writeFile(join(contents, "Info.plist"), expected.plist, {
     encoding: "utf8",
     flag: "wx",
@@ -384,6 +394,223 @@ async function writeDurableJson(path, value) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+function preparationIntentPath(home) {
+  return join(home, PREPARATION_FILE);
+}
+
+function assertPreparationIntent(value, home = value?.home) {
+  const keys = [
+    "appPath",
+    "applications",
+    "applicationsPriorExisted",
+    "backupPath",
+    "home",
+    "installRoot",
+    "operation",
+    "product",
+    "schemaVersion",
+    "stagePath",
+    "transactionId",
+  ];
+  if (
+    value === null
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || !exactKeys(value, keys)
+    || value.schemaVersion !== 1
+    || value.product !== GENERATOR_ID
+    || value.operation !== "prepare-macos-launcher"
+    || typeof value.applicationsPriorExisted !== "boolean"
+    || typeof value.transactionId !== "string"
+    || !UUID_PATTERN.test(value.transactionId)
+  ) throw new Error("launcher preparation intent schema 无效");
+  home = assertAbsolutePath(home, "launcher preparation home");
+  const installRoot = assertAbsolutePath(value.installRoot, "launcher preparation installRoot");
+  const applications = join(home, "Applications");
+  const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
+  const { stagePath, backupPath } = transactionPaths(appPath, value.transactionId);
+  if (
+    value.home !== home
+    || value.installRoot !== installRoot
+    || value.applications !== applications
+    || value.appPath !== appPath
+    || value.stagePath !== stagePath
+    || value.backupPath !== backupPath
+  ) throw new Error("launcher preparation intent 路径无效");
+  return value;
+}
+
+async function writeExclusiveDurableJson(path, value) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let handle;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+    await handle.chmod(0o600);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await link(temporary, path);
+    await syncDirectory(dirname(path));
+    await unlink(temporary);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function readPreparationIntent(home) {
+  const path = preparationIntentPath(home);
+  const info = await pathInfo(path);
+  if (info === null) return null;
+  if (
+    info.isSymbolicLink()
+    || !info.isFile()
+    || info.size <= 0
+    || info.size > MAX_GENERATED_FILE_BYTES
+    || (info.mode & 0o777) !== 0o600
+  ) throw new Error("launcher preparation intent 不是 mode 0600 regular file");
+  const snapshot = await readSmallRegular(path, "launcher preparation intent");
+  let value;
+  try {
+    value = JSON.parse(snapshot.text);
+  } catch (cause) {
+    throw new Error("launcher preparation intent JSON 无效", { cause });
+  }
+  if (snapshot.text !== `${JSON.stringify(value)}\n`) {
+    throw new Error("launcher preparation intent JSON 不是 canonical document");
+  }
+  return assertPreparationIntent(value, home);
+}
+
+async function createPreparationIntent({
+  home,
+  installRoot,
+  applicationsPriorExisted,
+  transactionId,
+}) {
+  const applications = join(home, "Applications");
+  const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
+  const { stagePath, backupPath } = transactionPaths(appPath, transactionId);
+  const intent = assertPreparationIntent({
+    schemaVersion: 1,
+    product: GENERATOR_ID,
+    operation: "prepare-macos-launcher",
+    transactionId,
+    home,
+    applications,
+    applicationsPriorExisted,
+    appPath,
+    stagePath,
+    backupPath,
+    installRoot,
+  }, home);
+  await writeExclusiveDurableJson(preparationIntentPath(home), intent);
+  return intent;
+}
+
+async function clearPreparationIntent(home, transactionId) {
+  const intent = await readPreparationIntent(home);
+  if (intent === null) return false;
+  if (intent.transactionId !== transactionId) {
+    throw new Error("launcher preparation intent transaction 发生变化");
+  }
+  await unlink(preparationIntentPath(home));
+  await syncDirectory(home);
+  return true;
+}
+
+async function validatePartialBundleStage(intent) {
+  const app = await pathInfo(intent.stagePath);
+  if (
+    app === null
+    || app.isSymbolicLink()
+    || !app.isDirectory()
+    || await realpath(intent.stagePath) !== join(
+      await realpath(dirname(intent.stagePath)),
+      intent.stagePath.slice(dirname(intent.stagePath).length + 1),
+    )
+  ) throw new Error("partial launcher stage 不是 canonical real directory");
+  const appNames = (await readdir(intent.stagePath)).sort();
+  if (appNames.some((name) => name !== "Contents")) {
+    throw new Error("partial launcher stage 含有未归属顶层内容");
+  }
+  if (!appNames.includes("Contents")) return;
+  const contents = join(intent.stagePath, "Contents");
+  const contentsInfo = await lstat(contents);
+  if (contentsInfo.isSymbolicLink() || !contentsInfo.isDirectory()) {
+    throw new Error("partial launcher Contents 不安全");
+  }
+  const contentNames = (await readdir(contents)).sort();
+  if (contentNames.some((name) => !["Info.plist", "MacOS"].includes(name))) {
+    throw new Error("partial launcher Contents 含有未归属内容");
+  }
+  if (contentNames.includes("Info.plist")) {
+    const info = await lstat(join(contents, "Info.plist"));
+    if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_GENERATED_FILE_BYTES) {
+      throw new Error("partial launcher Info.plist 不安全");
+    }
+  }
+  if (!contentNames.includes("MacOS")) return;
+  const macos = join(contents, "MacOS");
+  const macosInfo = await lstat(macos);
+  if (macosInfo.isSymbolicLink() || !macosInfo.isDirectory()) {
+    throw new Error("partial launcher MacOS 不安全");
+  }
+  const executableNames = await readdir(macos);
+  if (executableNames.some((name) => name !== EXECUTABLE_NAME)) {
+    throw new Error("partial launcher MacOS 含有未归属内容");
+  }
+  if (executableNames.includes(EXECUTABLE_NAME)) {
+    const info = await lstat(join(macos, EXECUTABLE_NAME));
+    if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_GENERATED_FILE_BYTES) {
+      throw new Error("partial launcher executable 不安全");
+    }
+  }
+}
+
+async function removeApplicationsIfCreatedAndEmpty(intent, { lockMayExist = false } = {}) {
+  if (intent.applicationsPriorExisted) return false;
+  const info = await pathInfo(intent.applications);
+  if (info === null) return false;
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("本次创建的 Applications 路径已变成非目录");
+  }
+  const names = await readdir(intent.applications);
+  const allowed = lockMayExist ? new Set([LOCK_DIRECTORY]) : new Set();
+  if (names.some((name) => !allowed.has(name))) return false;
+  if (names.length !== 0) return false;
+  await rmdir(intent.applications);
+  await syncDirectory(intent.home);
+  return true;
+}
+
+async function recoverPreparationIntent(home, { lockMayExist = false } = {}) {
+  const intent = await readPreparationIntent(home);
+  if (intent === null) return { recovered: false, applicationsPriorExisted: true };
+  if (await pathInfo(intent.backupPath)) {
+    throw new Error("launcher prepare 在 publish 前意外创建了 backup");
+  }
+  if (await pathInfo(intent.stagePath)) {
+    try {
+      await validateAttributedBundle(intent.stagePath, expectedLauncher(intent.installRoot));
+    } catch {
+      await validatePartialBundleStage(intent);
+    }
+    await rm(intent.stagePath, { recursive: true, force: false });
+    await syncDirectory(intent.applications);
+  }
+  await clearPreparationIntent(home, intent.transactionId);
+  await removeApplicationsIfCreatedAndEmpty(intent, { lockMayExist });
+  return {
+    recovered: true,
+    action: "prepare-cleanup",
+    applicationsPriorExisted: intent.applicationsPriorExisted,
+  };
 }
 
 async function readTransaction(path) {
@@ -575,20 +802,33 @@ export async function acquireMacosLauncherInstallLock({ home, isProcessAlive } =
   home = assertAbsolutePath(home, "home");
   const canonicalHome = await requireRealDirectory(home, "home");
   const applications = join(home, "Applications");
+  const applicationsInfo = await pathInfo(applications);
+  const applicationsPriorExisted = applicationsInfo !== null;
+  if (applicationsInfo !== null) {
+    const observed = await requireRealDirectory(applications, "Applications");
+    if (observed !== join(canonicalHome, "Applications")) {
+      throw new Error("Applications 必须位于用户 home 内");
+    }
+  }
   await mkdir(applications, { recursive: true, mode: 0o755 });
   const canonicalApplications = await requireRealDirectory(applications, "Applications");
   if (canonicalApplications !== join(canonicalHome, "Applications")) {
     throw new Error("Applications 必须位于用户 home 内");
   }
-  const release = await acquireInstallLock(applications, isProcessAlive);
+  const releaseLock = await acquireInstallLock(applications, isProcessAlive);
+  let removeApplicationsAfterRelease = !applicationsPriorExisted;
   try {
     await recoverTransaction({
       appPath: join(applications, `${MACOS_LAUNCHER_NAME}.app`),
       journalPath: join(applications, TRANSACTION_FILE),
     });
+    const preparationRecovery = await recoverPreparationIntent(home, { lockMayExist: true });
+    if (preparationRecovery.recovered && !preparationRecovery.applicationsPriorExisted) {
+      removeApplicationsAfterRelease = true;
+    }
   } catch (error) {
     try {
-      await release();
+      await releaseLock();
     } catch (releaseError) {
       throw new AggregateError(
         [error, releaseError],
@@ -597,7 +837,19 @@ export async function acquireMacosLauncherInstallLock({ home, isProcessAlive } =
     }
     throw error;
   }
-  return { applications, home, release };
+  const release = async () => {
+    await releaseLock();
+    if (!removeApplicationsAfterRelease) return;
+    const info = await pathInfo(applications);
+    if (info === null) return;
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error("Applications 在 launcher lock 释放前变成非目录");
+    }
+    if ((await readdir(applications)).length !== 0) return;
+    await rmdir(applications);
+    await syncDirectory(home);
+  };
+  return { applications, applicationsPriorExisted, home, release };
 }
 
 function assertSha256(value, label) {
@@ -640,12 +892,16 @@ function assertLauncherParticipant(value) {
   const { backupPath, stagePath } = transactionPaths(appPath, value.transactionId);
   if (
     value.applications !== applications
+    || value.intentPath !== preparationIntentPath(home)
     || value.appPath !== appPath
     || value.backupPath !== backupPath
     || value.stagePath !== stagePath
   ) throw new Error("launcher participant 路径未由 home 和 transactionId 严格派生");
   if (typeof value.beforeExisted !== "boolean" || typeof value.unchanged !== "boolean") {
     throw new Error("launcher participant flags 无效");
+  }
+  if (typeof value.applicationsPriorExisted !== "boolean") {
+    throw new Error("launcher participant Applications prestate 无效");
   }
   const expected = expectedLauncher(installRoot);
   assertSha256(value.afterExecutableSha256, "after executable");
@@ -716,6 +972,8 @@ export async function prepareMacosLauncher({
   installRoot,
   validationRoot = installRoot,
   transactionId = randomUUID(),
+  applicationsPriorExisted,
+  hooks = {},
 } = {}) {
   home = assertAbsolutePath(home, "home");
   installRoot = assertAbsolutePath(installRoot, "installRoot");
@@ -724,12 +982,22 @@ export async function prepareMacosLauncher({
   const canonicalHome = await requireRealDirectory(home, "home");
   await requireStableEntrypoint(validationRoot);
   const applications = join(home, "Applications");
-  await mkdir(applications, { recursive: true, mode: 0o755 });
-  const canonicalApplications = await requireRealDirectory(applications, "Applications");
-  if (canonicalApplications !== join(canonicalHome, "Applications")) {
-    throw new Error("Applications 必须位于用户 home 内");
+  const applicationsInfo = await pathInfo(applications);
+  if (applicationsPriorExisted === undefined) {
+    applicationsPriorExisted = applicationsInfo !== null;
+  } else if (typeof applicationsPriorExisted !== "boolean") {
+    throw new Error("applicationsPriorExisted 必须是布尔值");
   }
-  if (await pathInfo(join(applications, TRANSACTION_FILE))) {
+  if (applicationsPriorExisted && applicationsInfo === null) {
+    throw new Error("Applications prestate 声称存在但当前缺失");
+  }
+  if (applicationsInfo !== null) {
+    const canonicalApplications = await requireRealDirectory(applications, "Applications");
+    if (canonicalApplications !== join(canonicalHome, "Applications")) {
+      throw new Error("Applications 必须位于用户 home 内");
+    }
+  }
+  if (applicationsInfo !== null && await pathInfo(join(applications, TRANSACTION_FILE))) {
     throw new Error("存在未完成的 standalone launcher transaction journal");
   }
   const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
@@ -737,11 +1005,24 @@ export async function prepareMacosLauncher({
   if (await pathInfo(stagePath) || await pathInfo(backupPath)) {
     throw new Error("launcher participant stage 或 backup 已存在");
   }
-  const existingInfo = await pathInfo(appPath);
-  const before = existingInfo === null ? null : await validateAttributedBundle(appPath);
   const expected = expectedLauncher(installRoot);
+  let intent = null;
   try {
-    await stageBundle(stagePath, expected);
+    intent = await createPreparationIntent({
+      home,
+      installRoot,
+      applicationsPriorExisted,
+      transactionId,
+    });
+    await hooks.afterPreparationIntent?.({ intent });
+    await mkdir(applications, { recursive: true, mode: 0o755 });
+    const canonicalApplications = await requireRealDirectory(applications, "Applications");
+    if (canonicalApplications !== join(canonicalHome, "Applications")) {
+      throw new Error("Applications 必须位于用户 home 内");
+    }
+    const existingInfo = await pathInfo(appPath);
+    const before = existingInfo === null ? null : await validateAttributedBundle(appPath);
+    await stageBundle(stagePath, expected, hooks);
     const unchanged = before !== null
       && before.executableSha256 === expected.executableSha256
       && before.plistSha256 === expected.plistSha256;
@@ -751,6 +1032,8 @@ export async function prepareMacosLauncher({
       transactionId,
       home,
       applications,
+      applicationsPriorExisted,
+      intentPath: preparationIntentPath(home),
       appPath,
       stagePath,
       backupPath,
@@ -763,12 +1046,14 @@ export async function prepareMacosLauncher({
       afterPlistSha256: expected.plistSha256,
       unchanged,
     }), stagePath);
-    return assertLauncherParticipant({
+    const participant = assertLauncherParticipant({
       schemaVersion: 1,
       product: GENERATOR_ID,
       transactionId,
       home,
       applications,
+      applicationsPriorExisted,
+      intentPath: preparationIntentPath(home),
       appPath,
       stagePath,
       backupPath,
@@ -781,8 +1066,26 @@ export async function prepareMacosLauncher({
       afterPlistSha256: expected.plistSha256,
       unchanged,
     });
+    if (unchanged) await clearPreparationIntent(home, transactionId);
+    await hooks.afterPrepare?.({ participant });
+    return participant;
   } catch (error) {
-    if (await pathInfo(stagePath)) await rm(stagePath, { recursive: true, force: true });
+    let cleanupError = null;
+    try {
+      if (intent !== null) {
+        await recoverPreparationIntent(home, { lockMayExist: true });
+      } else if (await pathInfo(stagePath)) {
+        throw new Error("launcher stage 在 durable preparation intent 前出现");
+      }
+    } catch (failure) {
+      cleanupError = failure;
+    }
+    if (cleanupError !== null) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "launcher prepare 与 cleanup 同时失败",
+      );
+    }
     throw error;
   }
 }
@@ -823,6 +1126,7 @@ export async function rollbackMacosLauncher(value) {
   await validateParticipantContext(participant);
   if (participant.unchanged) {
     await validateParticipantAfterBundle(participant, participant.appPath);
+    await clearPreparationIntent(participant.home, participant.transactionId);
     return { ...participant, rolledBack: false };
   }
   const backup = await pathInfo(participant.backupPath);
@@ -847,6 +1151,8 @@ export async function rollbackMacosLauncher(value) {
   } else if (await pathInfo(participant.appPath)) {
     throw new Error("launcher rollback 遗留了原本不存在的 app");
   }
+  await clearPreparationIntent(participant.home, participant.transactionId);
+  await removeApplicationsIfCreatedAndEmpty(participant, { lockMayExist: true });
   return { ...participant, rolledBack: true };
 }
 
@@ -861,6 +1167,7 @@ export async function finalizeMacosLauncher(value) {
     if (!participant.beforeExisted) throw new Error("无 prestate 的 launcher participant 出现 backup");
     await removeParticipantBeforeBundle(participant, participant.backupPath);
   }
+  await clearPreparationIntent(participant.home, participant.transactionId);
   return {
     ...participant,
     finalized: true,
@@ -872,21 +1179,15 @@ export async function finalizeMacosLauncher(value) {
 export async function installMacosLauncher({ home, installRoot, hooks = {}, isProcessAlive } = {}) {
   home = assertAbsolutePath(home, "home");
   installRoot = assertAbsolutePath(installRoot, "installRoot");
-  const canonicalHome = await requireRealDirectory(home, "home");
   const entrypoint = await requireStableEntrypoint(installRoot);
-  const applications = join(home, "Applications");
-  await mkdir(applications, { recursive: true, mode: 0o755 });
-  const canonicalApplications = await requireRealDirectory(applications, "Applications");
-  if (canonicalApplications !== join(canonicalHome, "Applications")) {
-    throw new Error("Applications 必须位于用户 home 内");
-  }
+  const launcherLock = await acquireMacosLauncherInstallLock({ home, isProcessAlive });
+  const { applications } = launcherLock;
 
   const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
   const journalPath = join(applications, TRANSACTION_FILE);
-  const releaseLock = await acquireInstallLock(applications, isProcessAlive);
+  const releaseLock = launcherLock.release;
   let operationError = null;
   try {
-    await recoverTransaction({ appPath, journalPath });
     const existing = await pathInfo(appPath);
     if (existing !== null) await validateAttributedBundle(appPath);
     const transactionId = randomUUID();

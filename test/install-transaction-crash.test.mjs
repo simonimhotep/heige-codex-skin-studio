@@ -111,9 +111,28 @@ await installTree({
 
 async function assertRecoveryArtifactsGone(targetRoot) {
   await assert.rejects(lstat(`${targetRoot}.install-journal.json`), /ENOENT/);
+  await assert.rejects(lstat(`${targetRoot}.install-prepare.json`), /ENOENT/);
   await assert.rejects(lstat(`${targetRoot}.install.lock`), /ENOENT/);
   const parentNames = await readdir(join(targetRoot, ".."));
   assert.equal(parentNames.some((name) => name.includes(".staged.") || name.includes(".backup.")), false);
+}
+
+for (const hook of ["afterStageCreated", "afterPrepare"]) {
+  test(`SIGKILL at ${hook} recovers the durable preparation intent`, async (t) => {
+    const fixture = await sourceFixture(t);
+
+    await killAtBoundary(t, { ...fixture, hook });
+
+    assert.equal((await lstat(`${fixture.targetRoot}.install-prepare.json`)).isFile(), true);
+    const recovery = await recoverInstallTree({ targetRoot: fixture.targetRoot });
+    assert.deepEqual(recovery, { recovered: true, action: "prepare-cleanup" });
+    await assert.rejects(lstat(fixture.targetRoot), /ENOENT/);
+    await assertRecoveryArtifactsGone(fixture.targetRoot);
+
+    const retry = await installTree(fixture);
+    assert.equal(retry.installed, true);
+    assert.equal(await readFile(join(fixture.targetRoot, "src", "src.txt"), "utf8"), "src-v1\n");
+  });
 }
 
 test("SIGKILL before the commit decision recovers by rolling back the old tree", async (t) => {
