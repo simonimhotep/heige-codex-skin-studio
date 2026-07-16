@@ -199,4 +199,11 @@ test("outer decision validator rejects missing malformed or semantically misplac
     ...document,
     ack: null,
   }), /ACK authority/i);
+  assert.throws(() => validateKnownOuterTransactionDocument({
+    ...document,
+    decision: "undecided",
+    phase: "ready-acked",
+    serviceParticipant: null,
+    ack: null,
+  }), /ACK authority/i);
 });

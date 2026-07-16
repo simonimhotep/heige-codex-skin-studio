@@ -103,10 +103,11 @@ export function validateKnownOuterTransactionDocument(document, {
     const servicePrepared = isRecord(document.serviceParticipant);
     const hasExactAck = validExactAck(document.ack);
     const ackOptional = document.phase === "rollback-decided";
-    const ackRequired = document.phase === "ready-acked" ||
-      (document.phase === "commit-decided" && servicePrepared);
+    const ackRequired = servicePrepared &&
+      ["ready-acked", "commit-decided"].includes(document.phase);
     const ackForbidden = !ackOptional && !ackRequired;
     if (
+      (document.phase === "ready-acked" && !servicePrepared) ||
       (ackRequired && !hasExactAck) ||
       (ackForbidden && document.ack !== null) ||
       (ackOptional && !(document.ack === null || hasExactAck))
