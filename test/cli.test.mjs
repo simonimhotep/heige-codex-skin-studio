@@ -1569,7 +1569,10 @@ test("controller command never reports exit-zero success for an error state", as
       stop: async () => ({ stopped: true }),
     }),
   });
-  await assert.rejects(runCli(["controller", "--once"], fx.deps), /控制器启动或巡检失败/);
+  await assert.rejects(
+    runCli(["controller", "--platform", "darwin", "--once"], fx.deps),
+    /控制器启动或巡检失败/,
+  );
 });
 
 test("controller CLI rejects dynamic handshake credentials outside the one-shot request file", async () => {

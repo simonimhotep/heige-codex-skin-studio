@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   access,
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -52,6 +53,8 @@ function centralDirectory(buffer) {
     const extraLength = buffer.readUInt16LE(offset + 30);
     const commentLength = buffer.readUInt16LE(offset + 32);
     const externalAttributes = buffer.readUInt32LE(offset + 38);
+    const dosTime = buffer.readUInt16LE(offset + 12);
+    const dosDate = buffer.readUInt16LE(offset + 14);
     const nameStart = offset + 46;
     const name = buffer.subarray(nameStart, nameStart + nameLength).toString("utf8");
     const extra = buffer.subarray(nameStart + nameLength, nameStart + nameLength + extraLength);
@@ -68,6 +71,8 @@ function centralDirectory(buffer) {
     entries.push({
       name,
       mode: (externalAttributes >>> 16) & 0o777,
+      dosTime,
+      dosDate,
       unixMtime,
     });
     offset = nameStart + nameLength + extraLength + commentLength;
@@ -105,10 +110,29 @@ test("two allowlisted builds are byte-identical and do not touch tracked output"
   assert.equal(await gitStatus(), beforeStatus);
 });
 
+test("allowlisted builds are byte-identical across host timezones", async (t) => {
+  const outputRoot = await mkdtemp(join(tmpdir(), "heige-package-timezone-"));
+  t.after(() => rm(outputRoot, { recursive: true, force: true }));
+  const script = join(repoRoot, "scripts/package-skill.mjs");
+  const utc = join(outputRoot, "utc.skill");
+  const shanghai = join(outputRoot, "shanghai.skill");
+  for (const [timezone, output] of [["UTC", utc], ["Asia/Shanghai", shanghai]]) {
+    await execFileAsync(process.execPath, [
+      script,
+      "--output", output,
+      "--source-date-epoch", String(fixedEpoch),
+    ], { env: { ...process.env, TZ: timezone } });
+  }
+  assert.equal(await sha256(utc), await sha256(shanghai));
+});
+
 test("packager rejects an untracked file inside a recursive release root", async (t) => {
   const fixtureAlias = await mkdtemp(join(tmpdir(), "heige-package-untracked-"));
   const fixture = await realpath(fixtureAlias);
+  const outputRoot = await mkdtemp(join(tmpdir(), "heige-package-untracked-output-"));
+  const candidate = join(outputRoot, "candidate.skill");
   t.after(() => rm(fixtureAlias, { recursive: true, force: true }));
+  t.after(() => rm(outputRoot, { recursive: true, force: true }));
   await mkdir(join(fixture, "scripts"), { recursive: true });
   await mkdir(join(fixture, "payload"), { recursive: true });
   await mkdir(join(fixture, "output"), { recursive: true });
@@ -138,7 +162,7 @@ test("packager rejects an untracked file inside a recursive release root", async
   try {
     await execFileAsync(process.execPath, [
       join(fixture, "scripts/package-skill.mjs"),
-      "--output", join(fixture, "candidate.skill"),
+      "--output", candidate,
       "--source-date-epoch", String(fixedEpoch),
     ]);
   } catch (error) {
@@ -146,7 +170,7 @@ test("packager rejects an untracked file inside a recursive release root", async
   }
   if (failure === null) {
     const { stdout } = await execFileAsync("/usr/bin/unzip", [
-      "-Z1", join(fixture, "candidate.skill"),
+      "-Z1", candidate,
     ], { encoding: "utf8" });
     assert.fail(`packager accepted an untracked recursive source:\n${stdout}`);
   }
@@ -188,6 +212,8 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
   );
   for (const entry of entries) {
     assert.equal(entry.unixMtime, fixedEpoch, `fixed UTC mtime: ${entry.name}`);
+    assert.equal(entry.dosTime, 0, `fixed UTC DOS time: ${entry.name}`);
+    assert.equal(entry.dosDate, 0x5821, `fixed UTC DOS date: ${entry.name}`);
     assert.equal(entry.mode, entry.name.endsWith(".command") ? 0o755 : 0o644, `fixed mode: ${entry.name}`);
   }
   const runtimePackage = JSON.parse(await readZipText(
@@ -246,6 +272,7 @@ test("CLI requires exact explicit absolute output and epoch arguments", async (t
     [],
     ["--output", "relative.skill", "--source-date-epoch", String(fixedEpoch)],
     ["--output", output],
+    ["--output", output, "--source-date-epoch", "2147483648"],
     ["--output", output, "--source-date-epoch", String(fixedEpoch), "--extra"],
   ]) {
     await assert.rejects(execFileAsync(process.execPath, [script, ...args]), /output|absolute|epoch|argument|usage/i);
@@ -259,6 +286,72 @@ test("tracked candidate output needs an explicit release-only override", async (
     packageSkill(tracked, { sourceDateEpoch: fixedEpoch, allowTrackedOutput: false }),
     /tracked|HEIGE_ALLOW_TRACKED_PACKAGE_OUTPUT/,
   );
+});
+
+test("packager refuses every other repository-internal output, including parent aliases", async (t) => {
+  const aliasRoot = await mkdtemp(join(tmpdir(), "heige-package-output-alias-"));
+  t.after(() => rm(aliasRoot, { recursive: true, force: true }));
+  const victim = join(repoRoot, "output", `.output-guard-${randomUUID()}.skill`);
+  t.after(() => rm(victim, { force: true }));
+  await assert.rejects(
+    packageSkill(victim, { sourceDateEpoch: fixedEpoch }),
+    /仓库根目录/,
+  );
+  await assert.rejects(access(victim), (error) => error.code === "ENOENT");
+
+  const alias = join(aliasRoot, "repo-output");
+  await symlink(join(repoRoot, "output"), alias, "dir");
+  const aliasedName = `.aliased-${randomUUID()}.skill`;
+  const aliased = join(alias, aliasedName);
+  await assert.rejects(
+    packageSkill(aliased, { sourceDateEpoch: fixedEpoch }),
+    /仓库根目录/,
+  );
+  await assert.rejects(
+    access(join(repoRoot, "output", aliasedName)),
+    (error) => error.code === "ENOENT",
+  );
+
+  const nestedName = `.nested-${randomUUID()}`;
+  await assert.rejects(
+    packageSkill(join(alias, nestedName, "child", "candidate.skill"), { sourceDateEpoch: fixedEpoch }),
+    /仓库根目录/,
+  );
+  await assert.rejects(
+    access(join(repoRoot, "output", nestedName)),
+    (error) => error.code === "ENOENT",
+  );
+});
+
+test("macOS firmlink aliases cannot bypass repository output authorization", {
+  skip: process.platform !== "darwin" || !repoRoot.startsWith("/Users/"),
+}, async (t) => {
+  const dataAliasRoot = `/System/Volumes/Data${repoRoot}`;
+  const [rootInfo, aliasInfo] = await Promise.all([
+    lstat(repoRoot, { bigint: true }),
+    lstat(dataAliasRoot, { bigint: true }).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }),
+  ]);
+  if (aliasInfo === null) {
+    t.skip("host does not expose the macOS Data-volume firmlink path");
+    return;
+  }
+  assert.equal(typeof rootInfo.dev, "bigint");
+  assert.equal(typeof rootInfo.ino, "bigint");
+  if (rootInfo.dev !== aliasInfo.dev || rootInfo.ino !== aliasInfo.ino) {
+    t.skip("host does not expose the macOS Data-volume firmlink alias");
+    return;
+  }
+  const artifact = join(repoRoot, "output", "heige-codex-skin-studio.skill");
+  const aliasArtifact = join(dataAliasRoot, "output", "heige-codex-skin-studio.skill");
+  const before = await sha256(artifact);
+  await assert.rejects(
+    packageSkill(aliasArtifact, { sourceDateEpoch: fixedEpoch, allowTrackedOutput: false }),
+    /tracked|HEIGE_ALLOW_TRACKED_PACKAGE_OUTPUT/,
+  );
+  assert.equal(await sha256(artifact), before);
 });
 
 test("shell wrapper requires output and forwards an explicit epoch", async (t) => {

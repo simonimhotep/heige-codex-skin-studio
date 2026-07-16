@@ -6,7 +6,7 @@
 
 本分支的最终交付门槛是：本地完整验证通过，macOS 当前机器实测通过，Windows 自动化证据通过，200-agent 专家复审无未处置的 P0/P1，确定性安装包与本文摘要一致，并且新建 Draft PR 后 GitHub Actions 全部通过。
 
-<!-- heige-package-sha256 --> Package SHA-256: 7c413187d377d16c6dc15af5aeaab22365a008efb4ba2a04280293026f214650
+<!-- heige-package-sha256 --> Package SHA-256: 87d935cdad641d4a9bff8e33a0241ecc789664987ef36b346d6b77f1e0af99cc
 
 ## 已确认的产品边界
 

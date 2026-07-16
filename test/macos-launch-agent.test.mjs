@@ -135,8 +135,9 @@ function legacyPlistBytes(plist) {
 }
 
 async function fixture(t, overrides = {}) {
+  const baseParent = overrides.baseParent ?? userInfo().homedir;
   const base = await fsPromises.realpath(
-    await mkdtemp(join(tmpdir(), "heige-launch-agent-")),
+    await mkdtemp(join(baseParent, ".heige-launch-agent-")),
   );
   t.after(() => rm(base, { recursive: true, force: true }));
 
@@ -1945,6 +1946,20 @@ test("temporary or unapproved watchdog executable paths fail attribution closed"
   });
   await assert.rejects(migrateLegacyWatchdog(unknown), /legacy attribution/i);
   assert.equal(await pathExists(unknown.oldPlistPath), true);
+});
+
+test("macOS canonical temporary directory aliases fail attribution closed", {
+  skip: process.platform !== "darwin",
+}, async (t) => {
+  const canonicalTmp = await fsPromises.realpath(tmpdir());
+  if (!canonicalTmp.startsWith("/private/var/folders/")) {
+    t.skip(`host tmpdir does not exercise the /private/var/folders alias: ${canonicalTmp}`);
+    return;
+  }
+  const temporary = await fixture(t, { baseParent: tmpdir() });
+  assert.match(temporary.stableInstallRoot, /^\/private\/var\/folders\//u);
+  await assert.rejects(migrateLegacyWatchdog(temporary), /legacy attribution/i);
+  assert.equal(await pathExists(temporary.oldPlistPath), true);
 });
 
 test("legacy attribution rejects canonical plist and executable symlink escapes", async (t) => {

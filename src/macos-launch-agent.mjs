@@ -292,9 +292,32 @@ function isWithin(root, candidate) {
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
 }
 
+function canonicalMacPathAliases(path) {
+  const value = resolve(path);
+  const aliases = new Set([value]);
+  if (value === "/tmp" || value.startsWith("/tmp/")) aliases.add(`/private${value}`);
+  if (value === "/private/tmp" || value.startsWith("/private/tmp/")) {
+    aliases.add(value.slice("/private".length));
+  }
+  if (value === "/var" || value.startsWith("/var/")) aliases.add(`/private${value}`);
+  if (value === "/private/var" || value.startsWith("/private/var/")) {
+    aliases.add(value.slice("/private".length));
+  }
+  return [...aliases];
+}
+
 function isTemporaryPath(path) {
-  const roots = [tmpdir(), "/tmp", "/private/tmp", "/var/tmp"];
-  return roots.some((root) => isWithin(root, path));
+  const roots = [
+    tmpdir(),
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+  ].flatMap(canonicalMacPathAliases);
+  const candidates = canonicalMacPathAliases(path);
+  return roots.some((root) => candidates.some((candidate) => isWithin(root, candidate)));
 }
 
 function validateProgramArguments(programArguments) {

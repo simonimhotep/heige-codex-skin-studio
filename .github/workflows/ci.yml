@@ -20,6 +20,12 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+      - name: Install zsh for macOS shell contract tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y zsh
+          test -x /bin/zsh
+          /bin/zsh -c '[[ $ZSH_VERSION == 5.9 ]]'
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22.22.3"
@@ -42,6 +48,11 @@ jobs:
           node-version: "22.22.3"
           cache: npm
       - run: npm ci
+      - name: Rebuild the exact tracked candidate on macOS
+        run: |
+          node scripts/package-skill.mjs --output "$RUNNER_TEMP/macos.skill" --source-date-epoch 1704067200
+          cmp "$RUNNER_TEMP/macos.skill" output/heige-codex-skin-studio.skill
+          shasum -a 256 "$RUNNER_TEMP/macos.skill"
       - name: Run macOS unit tests
         run: >-
           node --test
@@ -181,6 +192,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Install zsh for package launcher tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y zsh
+          test -x /bin/zsh
+          /bin/zsh -c '[[ $ZSH_VERSION == 5.9 ]]'
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22.22.3"

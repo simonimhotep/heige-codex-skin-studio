@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   realpath,
@@ -1493,6 +1494,17 @@ test("artifact cleanup never unlinks a replacement with a different inode", asyn
     nonce: "dead-artifact",
   }));
   const replacement = "replacement must survive\n";
+  const replacementPath = `${path}.replacement`;
+  await writeFile(replacementPath, replacement, { mode: 0o600 });
+  const [originalInfo, replacementInfo] = await Promise.all([
+    lstat(path, { bigint: true }),
+    lstat(replacementPath, { bigint: true }),
+  ]);
+  assert.notDeepEqual(
+    [originalInfo.dev, originalInfo.ino],
+    [replacementInfo.dev, replacementInfo.ino],
+    "fixture must provide a distinct replacement inode",
+  );
 
   await assert.rejects(
     acquireOperationLock(acquisitionOptions(lockPath, {
@@ -1500,7 +1512,7 @@ test("artifact cleanup never unlinks a replacement with a different inode", asyn
         "before-artifact-tombstone": async ({ path: candidate }) => {
           if (candidate !== path) return;
           await unlink(path);
-          await writeFile(path, replacement, { mode: 0o600 });
+          await rename(replacementPath, path);
         },
       },
     })),

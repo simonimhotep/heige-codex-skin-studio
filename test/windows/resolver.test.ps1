@@ -108,6 +108,20 @@ try {
         Assert-Equal @("Kind", "ExecutablePath", "InstallPath", "ProductName", "PackageFullName", "Aumid") @($app.PSObject.Properties.Name)
     }
 
+    Test-Case "Structured app result rejects non-string nullable identity fields" {
+        foreach ($case in @(
+            [pscustomobject]@{ Name = "ExecutablePath"; ExecutablePath = 7; PackageFullName = $null; Aumid = $null },
+            [pscustomobject]@{ Name = "PackageFullName"; ExecutablePath = $script:Win32Exe; PackageFullName = 7; Aumid = $null },
+            [pscustomobject]@{ Name = "Aumid"; ExecutablePath = $script:Win32Exe; PackageFullName = $null; Aumid = 7 }
+        )) {
+            Assert-Throws {
+                New-CodexAppResult -Kind "Win32" -ExecutablePath $case.ExecutablePath `
+                    -InstallPath $script:Win32Root -ProductName "Codex" `
+                    -PackageFullName $case.PackageFullName -Aumid $case.Aumid
+            } "$($case.Name) must be a string or null"
+        }
+    }
+
     Test-Case "Immutable app identity round-trips and rebinds the same closed Win32 install" {
         $app = Resolve-CodexApp -OverridePath $script:Win32Exe -Packages @() -ProcessProvider { @() }
         $token = ConvertTo-HeiGeCodexAppIdentityToken -App $app

@@ -189,12 +189,21 @@ function Get-CodexProductName {
 function New-CodexAppResult {
     param(
         [string]$Kind,
-        [AllowNull()][string]$ExecutablePath,
+        [AllowNull()][object]$ExecutablePath,
         [string]$InstallPath,
         [string]$ProductName,
-        [AllowNull()][string]$PackageFullName,
-        [AllowNull()][string]$Aumid
+        [AllowNull()][object]$PackageFullName,
+        [AllowNull()][object]$Aumid
     )
+    if ($null -ne $ExecutablePath -and $ExecutablePath -isnot [string]) {
+        throw "ExecutablePath must be a string or null."
+    }
+    if ($null -ne $PackageFullName -and $PackageFullName -isnot [string]) {
+        throw "PackageFullName must be a string or null."
+    }
+    if ($null -ne $Aumid -and $Aumid -isnot [string]) {
+        throw "Aumid must be a string or null."
+    }
     return [pscustomobject][ordered]@{
         Kind = $Kind
         ExecutablePath = $ExecutablePath
