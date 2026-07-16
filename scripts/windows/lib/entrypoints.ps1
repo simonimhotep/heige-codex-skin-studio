@@ -43,11 +43,13 @@ function Get-HeiGeFlowContext {
         [Parameter(Mandatory = $true)][string]$Root,
         [scriptblock]$ContextProvider
     )
-    $values = if ($ContextProvider) {
-        @(& $ContextProvider $Root)
-    } else {
-        @(New-HeiGeWindowsEntrypointContext -Root $Root)
-    }
+    $values = @(
+        if ($ContextProvider) {
+            & $ContextProvider $Root
+        } else {
+            New-HeiGeWindowsEntrypointContext -Root $Root
+        }
+    )
     if ($values.Count -ne 1 -or $null -eq $values[0]) {
         throw "Windows 入口预检结果不唯一。"
     }
@@ -78,17 +80,19 @@ function Invoke-HeiGeContextCli {
         [System.EnvironmentVariableTarget]::Process
     )
     try {
-        $values = if ($CliProvider) {
-            @(& $CliProvider $Context $Arguments)
-        } else {
-            $cliArguments = @([string]$Context.CliPath) + @($Arguments)
-            $json = Invoke-SkinCli -Node ([string]$Context.NodePath) -CliArgs $cliArguments
-            try {
-                @($json | ConvertFrom-Json)
-            } catch {
-                throw "皮肤命令返回了无效 JSON：$($_.Exception.Message)"
+        $values = @(
+            if ($CliProvider) {
+                & $CliProvider $Context $Arguments
+            } else {
+                $cliArguments = @([string]$Context.CliPath) + @($Arguments)
+                $json = Invoke-SkinCli -Node ([string]$Context.NodePath) -CliArgs $cliArguments
+                try {
+                    $json | ConvertFrom-Json
+                } catch {
+                    throw "皮肤命令返回了无效 JSON：$($_.Exception.Message)"
+                }
             }
-        }
+        )
     } finally {
         [System.Environment]::SetEnvironmentVariable(
             $environmentName,
@@ -158,12 +162,14 @@ function Unregister-HeiGeEntrypointTask {
         [Parameter(Mandatory = $true)]$Context,
         [scriptblock]$UnregisterProvider
     )
-    $values = if ($UnregisterProvider) {
-        @(& $UnregisterProvider $Context)
-    } else {
-        @(Unregister-HeiGeScheduledTask -TaskName ([string]$Context.TaskName) `
-            -StateDirectory ([string]$Context.StateDirectory))
-    }
+    $values = @(
+        if ($UnregisterProvider) {
+            & $UnregisterProvider $Context
+        } else {
+            Unregister-HeiGeScheduledTask -TaskName ([string]$Context.TaskName) `
+                -StateDirectory ([string]$Context.StateDirectory)
+        }
+    )
     if ($values.Count -ne 1 -or $null -eq $values[0] -or
         $values[0].PSObject.Properties.Name -notcontains "VerifiedAbsent" -or
         $values[0].VerifiedAbsent -isnot [System.Boolean] -or
@@ -315,11 +321,13 @@ function Invoke-HeiGeApplyCompensation {
         [Parameter(Mandatory = $true)][ValidateSet("native", "closed")][string]$Mode,
         [scriptblock]$CompensateProvider
     )
-    $values = if ($CompensateProvider) {
-        @(& $CompensateProvider $Context $Port $Mode)
-    } else {
-        @(Restore-HeiGeApplyPrestate -Context $Context -Port $Port -Mode $Mode)
-    }
+    $values = @(
+        if ($CompensateProvider) {
+            & $CompensateProvider $Context $Port $Mode
+        } else {
+            Restore-HeiGeApplyPrestate -Context $Context -Port $Port -Mode $Mode
+        }
+    )
     if ($values.Count -ne 1 -or $null -eq $values[0] -or
         $values[0].PSObject.Properties.Name -notcontains "Restored" -or
         $values[0].Restored -isnot [System.Boolean] -or

@@ -104,6 +104,15 @@ function Get-HeiGeStartMenuShortcutPath {
     return (Join-Path $root "HeiGe Codex Skin Studio\HeiGe 皮肤启动器.lnk")
 }
 
+function ConvertFrom-HeiGeWshIconLocation {
+    param([AllowNull()][string]$IconLocation)
+    if ([string]::IsNullOrEmpty($IconLocation) -or
+        $IconLocation -match '^\s*,\s*0\s*$') {
+        return ""
+    }
+    return $IconLocation
+}
+
 function New-DefaultHeiGeShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -119,7 +128,6 @@ function New-DefaultHeiGeShortcut {
     $shortcut.Arguments = $script:HeiGeStartMenuArguments
     $shortcut.WindowStyle = $script:HeiGeStartMenuWindowStyle
     $shortcut.Hotkey = $script:HeiGeStartMenuHotkey
-    $shortcut.IconLocation = $script:HeiGeStartMenuIconLocation
     $shortcut.Save()
 }
 
@@ -134,7 +142,8 @@ function Read-DefaultHeiGeShortcut {
         Arguments = [string]$shortcut.Arguments
         WindowStyle = [int]$shortcut.WindowStyle
         Hotkey = [string]$shortcut.Hotkey
-        IconLocation = [string]$shortcut.IconLocation
+        IconLocation = (ConvertFrom-HeiGeWshIconLocation `
+            -IconLocation ([string]$shortcut.IconLocation))
     }
 }
 

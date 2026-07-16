@@ -92,6 +92,35 @@ function New-TestShortcutObservation {
 }
 
 try {
+    Test-Case "Exact result cardinality ignores a singleton payload Count property" {
+        $context = New-TestEntrypointContext
+        $context | Add-Member -NotePropertyName Count -NotePropertyValue 7
+        $observedContext = Get-HeiGeFlowContext -Root $script:InstallRoot `
+            -ContextProvider { $context }
+        Assert-Equal 7 $observedContext.Count
+
+        $portableContext = New-TestEntrypointContext
+        $portableContext.App.ExecutablePath = $script:ApplyBat
+        $portableContext.App.InstallPath = $script:InstallRoot
+        $cliResult = Invoke-HeiGeContextCli -Context $portableContext `
+            -Arguments @("status") -CliProvider {
+                [pscustomobject]@{ mode = "active"; Count = 8 }
+            }
+        Assert-Equal 8 $cliResult.Count
+
+        $unregisterResult = Unregister-HeiGeEntrypointTask -Context $portableContext `
+            -UnregisterProvider {
+                [pscustomobject]@{ VerifiedAbsent = $true; Count = 9 }
+            }
+        Assert-Equal 9 $unregisterResult.Count
+
+        $compensationResult = Invoke-HeiGeApplyCompensation -Context $portableContext `
+            -Port 9341 -Mode "native" -CompensateProvider {
+                [pscustomobject]@{ Restored = $true; Mode = "native"; Count = 10 }
+            }
+        Assert-Equal 10 $compensationResult.Count
+    }
+
     Test-Case "Context CLI carries the exact app identity only for the child invocation" {
         $originalIdentity = $env:HEIGE_WINDOWS_APP_IDENTITY
         $env:HEIGE_WINDOWS_APP_IDENTITY = "previous-test-value"
@@ -620,6 +649,15 @@ try {
         Assert-Equal "session launcher" ([System.IO.File]::ReadAllText($shortcutPath))
     }
 
+    Test-Case "WScript no-icon serialization normalizes without hiding a custom icon" {
+        Assert-Equal "" (ConvertFrom-HeiGeWshIconLocation -IconLocation "")
+        Assert-Equal "" (ConvertFrom-HeiGeWshIconLocation -IconLocation ", 0")
+        Assert-Equal "" (ConvertFrom-HeiGeWshIconLocation -IconLocation "  ,0  ")
+        Assert-Equal "C:\Windows\custom.ico, 0" `
+            (ConvertFrom-HeiGeWshIconLocation -IconLocation "C:\Windows\custom.ico, 0")
+        Assert-Equal ", 1" (ConvertFrom-HeiGeWshIconLocation -IconLocation ", 1")
+    }
+
     Test-Case "Default WScript shortcut round-trips the complete generated schema" {
         $shortcutPath = Join-Path $script:Root "WScript Schema\HeiGe 皮肤启动器.lnk"
         New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
@@ -852,7 +890,8 @@ try {
         Assert-Match '\$shortcut\.Arguments\s*=\s*\$script:HeiGeStartMenuArguments' $source
         Assert-Match '\$shortcut\.WindowStyle\s*=\s*\$script:HeiGeStartMenuWindowStyle' $source
         Assert-Match '\$shortcut\.Hotkey\s*=\s*\$script:HeiGeStartMenuHotkey' $source
-        Assert-Match '\$shortcut\.IconLocation\s*=\s*\$script:HeiGeStartMenuIconLocation' $source
+        Assert-False ($source -match '\$shortcut\.IconLocation\s*=')
+        Assert-Match 'ConvertFrom-HeiGeWshIconLocation' $source
     }
 
     Test-Case "Exact process filtering cannot close a foreign Codex lookalike" {
@@ -996,10 +1035,13 @@ try {
         }
     }
 
-    Test-Case "Packaged Skill removes obsolete persistence guidance" {
+    Test-Case "Packaged Skill keeps only the non-actionable legacy persistence notice" {
         $combined = [System.IO.File]::ReadAllText($script:SkillInstructions) + "`n" +
             [System.IO.File]::ReadAllText($script:SkillReadme)
-        Assert-False ($combined -match 'enable-persist|disable-persist|10\s*分钟冷却|看门狗')
+        $deprecatedNotice = 'enable-persist\.command`?\s*是(?:已)?(?:弃用|废弃)的非零退出入口'
+        Assert-Match $deprecatedNotice $combined
+        $withoutDeprecatedNotice = [regex]::Replace($combined, $deprecatedNotice, '')
+        Assert-False ($withoutDeprecatedNotice -match 'enable-persist|disable-persist|10\s*分钟冷却|看门狗')
         Assert-False ($combined -match '当前只支持\s*macOS|不处理\s*Windows')
         Assert-False ($combined -match '重启即成功|重启后绝对不要重试')
     }
