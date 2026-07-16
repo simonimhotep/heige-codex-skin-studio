@@ -7,11 +7,11 @@ if curl --silent --fail --max-time 1 "http://127.0.0.1:${PORT}/json/list" >/dev/
   return 0
 fi
 
-if pgrep -f '^/Applications/ChatGPT\.app/Contents/MacOS/ChatGPT$' >/dev/null 2>&1; then
+if pgrep -f '^/Applications/ChatGPT\.app/Contents/MacOS/ChatGPT' >/dev/null 2>&1; then
   echo "正在正常退出 Codex，以调试端口重新打开……"
   osascript -e 'tell application id "com.openai.codex" to quit' >/dev/null
   for _ in {1..60}; do
-    pgrep -f '^/Applications/ChatGPT\.app/Contents/MacOS/ChatGPT$' >/dev/null 2>&1 || break
+    pgrep -f '^/Applications/ChatGPT\.app/Contents/MacOS/ChatGPT' >/dev/null 2>&1 || break
     sleep 0.25
   done
 fi
