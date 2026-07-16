@@ -7,6 +7,12 @@ if (-not $PSBoundParameters.ContainsKey("Port") -and $env:HEIGE_CODEX_SKIN_PORT)
     $Port = [int]$env:HEIGE_CODEX_SKIN_PORT
 }
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-Invoke-HeiGeRestoreFlow -Root $root -Port $Port | Out-Null
-Write-Host "常驻已关闭，Codex 已以默认前端重新启动。"
+$result = Invoke-HeiGeRestoreFlow -Root $root -Port $Port
+if ($result.Mode -ceq "closed") {
+    Write-Host "常驻已关闭。Codex 保持关闭。"
+} elseif ($result.Mode -ceq "native") {
+    Write-Host "常驻已关闭。Codex 保持原生界面运行。"
+} else {
+    Write-Host "常驻已关闭，Codex 已以默认前端重新启动。"
+}
 Write-Host "以后想再使用皮肤，可在开始菜单打开「HeiGe 皮肤启动器」。"

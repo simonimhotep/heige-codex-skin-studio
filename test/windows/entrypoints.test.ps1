@@ -50,6 +50,29 @@ function Assert-ExactCliCall {
     Assert-Equal $Expected $Actual
 }
 
+$script:ShortcutDescription = "HeiGe Codex Skin Studio launcher v1 | current-user | re-enable skin"
+
+function New-TestShortcutObservation {
+    param(
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [string]$Description = $script:ShortcutDescription,
+        [string]$Arguments = "",
+        [int]$WindowStyle = 1,
+        [string]$Hotkey = "",
+        [string]$IconLocation = ""
+    )
+    return [pscustomobject][ordered]@{
+        TargetPath = $TargetPath
+        WorkingDirectory = $WorkingDirectory
+        Description = $Description
+        Arguments = $Arguments
+        WindowStyle = $WindowStyle
+        Hotkey = $Hotkey
+        IconLocation = $IconLocation
+    }
+}
+
 try {
     Test-Case "Apply validates first and never enables persistence" {
         $script:Events = @()
@@ -94,6 +117,28 @@ try {
             -Expected @("set-persistence", "true", "--port", "9341")
         Assert-True $result.PersistenceEnabled
         Assert-Equal "complete" $result.Completion
+    }
+
+    Test-Case "Enable without an explicit theme applies the authoritative stored selection" {
+        $script:CliCalls = @()
+        $result = Invoke-HeiGeEnableSkinFlow -Root $script:InstallRoot -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -StartCdpProvider { param($Context, $Port) } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:CliCalls += ,@($Arguments)
+                if ($Arguments[0] -eq "apply") {
+                    return [pscustomobject]@{ mode = "active" }
+                }
+                return [pscustomobject]@{ persistenceEnabled = $true; revision = 5 }
+            } `
+            -UnregisterProvider { param($Context) throw "must not unregister" }
+        Assert-ExactCliCall -Actual $script:CliCalls[0] `
+            -Expected @("apply", "--prefer-stored", "--port", "9341")
+        Assert-ExactCliCall -Actual $script:CliCalls[1] `
+            -Expected @("set-persistence", "true", "--port", "9341")
+        Assert-True $result.PersistenceEnabled
+        Assert-Equal "stored-or-default" $result.ThemeSelection
     }
 
     Test-Case "Enable failure is explicit partial success with authoritative false and task absence" {
@@ -208,7 +253,7 @@ try {
         $script:Events = @()
         $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
-            -RequireCdpProvider { param($Context, $Port) $script:Events += "owner" } `
+            -CdpStatusProvider { param($Context, $Port) $script:Events += "owner"; $true } `
             -CliProvider {
                 param($Context, $Arguments)
                 if ($Arguments[0] -eq "set-persistence") {
@@ -229,12 +274,54 @@ try {
         Assert-Equal "restoring" $result.Mode
     }
 
+    Test-Case "Restore disables persistence while Codex is closed and keeps it closed" {
+        $script:Events = @()
+        $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+            -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $script:Events += "no-cdp"; $false } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:Events += ($Arguments -join " ")
+                [pscustomobject]@{ mode = "closed"; persistenceEnabled = $false; revision = 10 }
+            } `
+            -UnregisterProvider {
+                param($Context)
+                $script:Events += "unregister"
+                [pscustomobject]@{ VerifiedAbsent = $true }
+            } `
+            -RestartNativeProvider { param($Context, $Port) throw "closed Codex must stay closed" }
+        Assert-Equal @("preflight", "no-cdp", "set-persistence false --port 9341", "unregister") $script:Events
+        Assert-Equal "closed" $result.Mode
+        Assert-False $result.PersistenceEnabled
+    }
+
+    Test-Case "Restore disables persistence for native or CDP-unavailable Codex without starting it" {
+        $script:Events = @()
+        $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -CdpStatusProvider { param($Context, $Port) $script:Events += "cdp-unavailable"; $false } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:Events += ($Arguments -join " ")
+                [pscustomobject]@{ mode = "native"; persistenceEnabled = $false; revision = 12 }
+            } `
+            -UnregisterProvider {
+                param($Context)
+                $script:Events += "unregister"
+                [pscustomobject]@{ VerifiedAbsent = $true }
+            } `
+            -RestartNativeProvider { param($Context, $Port) throw "native Codex must not restart" }
+        Assert-Equal @("cdp-unavailable", "set-persistence false --port 9341", "unregister") $script:Events
+        Assert-Equal "native" $result.Mode
+        Assert-False $result.PersistenceEnabled
+    }
+
     Test-Case "Restore preflight failure cannot quit restart or mutate state" {
         $script:Events = @()
         Assert-Throws {
             Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
                 -ContextProvider { $script:Events += "preflight"; throw "dependency failed" } `
-                -RequireCdpProvider { param($Context, $Port) $script:Events += "owner" } `
+                -CdpStatusProvider { param($Context, $Port) $script:Events += "owner"; $true } `
                 -CliProvider { param($Context, $Arguments) $script:Events += "cli" } `
                 -UnregisterProvider { param($Context) $script:Events += "unregister" } `
                 -RestartNativeProvider { param($Context, $Port) $script:Events += "restart" }
@@ -253,14 +340,28 @@ try {
             } `
             -ReadShortcutProvider {
                 param($Path)
-                [pscustomobject]@{
-                    TargetPath = $script:ShortcutTarget
-                    WorkingDirectory = Split-Path $script:ShortcutTarget -Parent
-                }
+                New-TestShortcutObservation -TargetPath $script:ShortcutTarget `
+                    -WorkingDirectory (Split-Path $script:ShortcutTarget -Parent)
             }
         Assert-Equal $script:EnableBat $script:ShortcutTarget
         Assert-Equal (Join-Path $script:StartMenuRoot "HeiGe Codex Skin Studio\HeiGe 皮肤启动器.lnk") $result.ShortcutPath
         Assert-True $result.Verified
+    }
+
+    Test-Case "Default WScript shortcut round-trips the complete generated schema" {
+        $shortcutPath = Join-Path $script:Root "WScript Schema\HeiGe 皮肤启动器.lnk"
+        New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
+        New-DefaultHeiGeShortcut -Path $shortcutPath -Target $script:EnableBat `
+            -WorkingDirectory (Split-Path $script:EnableBat -Parent) `
+            -Description $script:ShortcutDescription
+        $observed = Read-DefaultHeiGeShortcut -Path $shortcutPath
+        Assert-Equal $script:EnableBat $observed.TargetPath
+        Assert-Equal (Split-Path $script:EnableBat -Parent) $observed.WorkingDirectory
+        Assert-Equal $script:ShortcutDescription $observed.Description
+        Assert-Equal "" $observed.Arguments
+        Assert-Equal 1 $observed.WindowStyle
+        Assert-Equal "" $observed.Hotkey
+        Assert-Equal "" $observed.IconLocation
     }
 
     Test-Case "Start Menu verification failure removes the untrusted shortcut" {
@@ -275,7 +376,7 @@ try {
                 } `
                 -ReadShortcutProvider {
                     param($Path)
-                    [pscustomobject]@{ TargetPath = "C:\foreign.bat"; WorkingDirectory = "C:\" }
+                    New-TestShortcutObservation -TargetPath "C:\foreign.bat" -WorkingDirectory "C:\"
                 }
         } "shortcut verification failed"
         Assert-False (Test-Path -LiteralPath $shortcutPath)
@@ -293,10 +394,8 @@ try {
         $script:TransactionalWorking = Split-Path $script:EnableBat -Parent
         $readProvider = {
             param($Path)
-            [pscustomobject]@{
-                TargetPath = $script:TransactionalTarget
-                WorkingDirectory = $script:TransactionalWorking
-            }
+            New-TestShortcutObservation -TargetPath $script:TransactionalTarget `
+                -WorkingDirectory $script:TransactionalWorking
         }
         $participant = Prepare-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
             -StartMenuRoot $transactionMenuRoot `
@@ -326,10 +425,8 @@ try {
         $script:TransactionalWorking = Split-Path $script:EnableBat -Parent
         $readProvider = {
             param($Path)
-            [pscustomobject]@{
-                TargetPath = $script:TransactionalTarget
-                WorkingDirectory = $script:TransactionalWorking
-            }
+            New-TestShortcutObservation -TargetPath $script:TransactionalTarget `
+                -WorkingDirectory $script:TransactionalWorking
         }
         $participant = Prepare-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
             -StartMenuRoot $finalizeMenuRoot `
@@ -353,10 +450,8 @@ try {
         $script:TransactionalWorking = Split-Path $script:EnableBat -Parent
         $readProvider = {
             param($Path)
-            [pscustomobject]@{
-                TargetPath = $script:TransactionalTarget
-                WorkingDirectory = $script:TransactionalWorking
-            }
+            New-TestShortcutObservation -TargetPath $script:TransactionalTarget `
+                -WorkingDirectory $script:TransactionalWorking
         }
         $participant = Prepare-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
             -StartMenuRoot $freshMenuRoot `
@@ -387,13 +482,105 @@ try {
                 } `
                 -ReadShortcutProvider {
                     param($Path)
-                    [pscustomobject]@{ TargetPath = "C:\foreign.bat"; WorkingDirectory = "C:\" }
+                    New-TestShortcutObservation -TargetPath "C:\foreign.bat" -WorkingDirectory "C:\"
                 } | Out-Null
         } "shortcut target path mismatch"
         Assert-Equal "foreign sentinel" ([System.IO.File]::ReadAllText($shortcutPath))
         $stagedArtifacts = @(Get-ChildItem -LiteralPath (Split-Path $shortcutPath -Parent) `
             -Filter "*.staged.*.lnk" -ErrorAction SilentlyContinue)
         Assert-Equal 0 $stagedArtifacts.Count
+    }
+
+    Test-Case "Start Menu prepare keeps a foreign same-target shortcut with a different marker" {
+        $foreignMenuRoot = Join-Path $script:Root "Foreign Marker Start Menu"
+        $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $foreignMenuRoot
+        New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
+        [System.IO.File]::WriteAllText($shortcutPath, "foreign marker sentinel")
+        Assert-Throws {
+            Prepare-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
+                -StartMenuRoot $foreignMenuRoot `
+                -ReadShortcutProvider {
+                    param($Path)
+                    New-TestShortcutObservation -TargetPath $script:EnableBat `
+                        -WorkingDirectory (Split-Path $script:EnableBat -Parent) `
+                        -Description "Foreign launcher"
+                } | Out-Null
+        } "shortcut description marker mismatch"
+        Assert-Equal "foreign marker sentinel" ([System.IO.File]::ReadAllText($shortcutPath))
+    }
+
+    Test-Case "Start Menu prepare keeps a foreign same-target shortcut with injected arguments" {
+        $foreignMenuRoot = Join-Path $script:Root "Foreign Arguments Start Menu"
+        $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $foreignMenuRoot
+        New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
+        [System.IO.File]::WriteAllText($shortcutPath, "foreign arguments sentinel")
+        Assert-Throws {
+            Prepare-HeiGeStartMenuShortcut -InstallRoot $script:InstallRoot `
+                -StartMenuRoot $foreignMenuRoot `
+                -ReadShortcutProvider {
+                    param($Path)
+                    New-TestShortcutObservation -TargetPath $script:EnableBat `
+                        -WorkingDirectory (Split-Path $script:EnableBat -Parent) `
+                        -Arguments "--theme foreign"
+                } | Out-Null
+        } "shortcut arguments mismatch"
+        Assert-Equal "foreign arguments sentinel" ([System.IO.File]::ReadAllText($shortcutPath))
+    }
+
+    Test-Case "Start Menu rejects a reparse ancestor before creating a shortcut" {
+        $path = "C:\Users\Alice\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\HeiGe Codex Skin Studio"
+        Assert-Throws {
+            Assert-HeiGeNoReparsePathComponents -Path $path -Description "test path" `
+                -ItemProvider {
+                    param($Candidate)
+                    $attributes = if ($Candidate -ieq "C:\Users\Alice\AppData\Roaming") {
+                        [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReparsePoint
+                    } else {
+                        [System.IO.FileAttributes]::Directory
+                    }
+                    [pscustomobject]@{ PSIsContainer = $true; Attributes = $attributes }
+                }
+        } "reparse point"
+    }
+
+    Test-Case "Start Menu can validate a staged tree while targeting the final install root" {
+        $futureInstallRoot = Join-Path $script:Root "Future Published Install"
+        $validationMenuRoot = Join-Path $script:Root "Validation Root Start Menu"
+        $script:ShortcutTarget = $null
+        $script:ShortcutWorking = $null
+        $participant = Prepare-HeiGeStartMenuShortcut -InstallRoot $futureInstallRoot `
+            -ValidationRoot $script:InstallRoot -StartMenuRoot $validationMenuRoot `
+            -CreateShortcutProvider {
+                param($Path, $Target, $WorkingDirectory, $Description)
+                $script:ShortcutTarget = $Target
+                $script:ShortcutWorking = $WorkingDirectory
+                [System.IO.File]::WriteAllText($Path, "staged validation shortcut")
+            } `
+            -ReadShortcutProvider {
+                param($Path)
+                New-TestShortcutObservation -TargetPath $script:ShortcutTarget `
+                    -WorkingDirectory $script:ShortcutWorking
+            }
+        Assert-Equal (Join-Path $futureInstallRoot "scripts\windows\enable-skin.bat") $participant.TargetPath
+        Assert-Equal $futureInstallRoot $participant.InstallRoot
+        Assert-False (Test-Path -LiteralPath $futureInstallRoot)
+        Rollback-HeiGeStartMenuShortcut -Participant $participant `
+            -ReadShortcutProvider {
+                param($Path)
+                New-TestShortcutObservation -TargetPath $script:ShortcutTarget `
+                    -WorkingDirectory $script:ShortcutWorking
+            } | Out-Null
+    }
+
+    Test-Case "Default Start Menu shortcut writes the complete generated schema" {
+        $source = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\lib\start-menu.ps1")
+        )
+        Assert-Match 'launcher v1 \| current-user \| re-enable skin' $source
+        Assert-Match '\$shortcut\.Arguments\s*=\s*\$script:HeiGeStartMenuArguments' $source
+        Assert-Match '\$shortcut\.WindowStyle\s*=\s*\$script:HeiGeStartMenuWindowStyle' $source
+        Assert-Match '\$shortcut\.Hotkey\s*=\s*\$script:HeiGeStartMenuHotkey' $source
+        Assert-Match '\$shortcut\.IconLocation\s*=\s*\$script:HeiGeStartMenuIconLocation' $source
     }
 
     Test-Case "Exact process filtering cannot close a foreign Codex lookalike" {
@@ -448,6 +635,29 @@ try {
         Assert-False ($source -match '"enable-skin"|"restore"')
         Assert-Match '"set-persistence",\s*"true"' $source
         Assert-Match '"set-persistence",\s*"false"' $source
+    }
+
+    Test-Case "Windows launcher preserves an omitted theme for authoritative selection" {
+        $source = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\enable-skin.ps1")
+        )
+        Assert-False ($source -match '\$Theme\s*=\s*"miku-488137"')
+        Assert-Match 'PSBoundParameters\.ContainsKey\("Theme"\)' $source
+        Assert-Match 'ThemeSelection' $source
+    }
+
+    Test-Case "Windows restore has an offline path and truthful closed native messages" {
+        $flow = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\lib\entrypoints.ps1")
+        )
+        $wrapper = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\restore.ps1")
+        )
+        Assert-Match 'CdpStatusProvider' $flow
+        Assert-Match '"closed"' $flow
+        Assert-Match '"native"' $flow
+        Assert-Match 'Codex 保持关闭' $wrapper
+        Assert-Match 'Codex 保持原生界面运行' $wrapper
     }
 
     Test-Case "BAT wrappers preserve the captured PowerShell failure code" {

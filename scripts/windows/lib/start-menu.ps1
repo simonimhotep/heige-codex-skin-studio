@@ -1,6 +1,11 @@
 ﻿# HeiGe Codex Skin Studio current-user Start Menu shortcut
 $ErrorActionPreference = "Stop"
 $script:HeiGeStartMenuProduct = "heige-codex-skin-studio"
+$script:HeiGeStartMenuDescription = "HeiGe Codex Skin Studio launcher v1 | current-user | re-enable skin"
+$script:HeiGeStartMenuArguments = ""
+$script:HeiGeStartMenuWindowStyle = 1
+$script:HeiGeStartMenuHotkey = ""
+$script:HeiGeStartMenuIconLocation = ""
 $script:HeiGeStartMenuParticipantKeys = @(
     "AfterSha256",
     "BackupPath",
@@ -48,6 +53,50 @@ function Get-HeiGeDefaultStartMenuRoot {
     return Get-HeiGeStartMenuFullPath -Path $path -Description "开始菜单目录"
 }
 
+function Assert-HeiGeNoReparsePathComponents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [scriptblock]$ItemProvider
+    )
+    $fullPath = Get-HeiGeStartMenuFullPath -Path $Path -Description $Description
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    if (-not $rootPath) { throw "$Description 无法解析文件系统根目录。" }
+    if (-not $ItemProvider) {
+        $ItemProvider = {
+            param($Candidate)
+            try {
+                Get-Item -LiteralPath $Candidate -Force -ErrorAction Stop
+            } catch [System.Management.Automation.ItemNotFoundException] {
+                return
+            }
+        }
+    }
+    $paths = @($rootPath)
+    $relative = $fullPath.Substring($rootPath.Length)
+    $current = $rootPath
+    foreach ($segment in @($relative -split '[\\/]' | Where-Object { $_ -ne "" })) {
+        $current = Join-Path $current $segment
+        $paths += $current
+    }
+    for ($index = 0; $index -lt $paths.Count; $index++) {
+        $candidate = [string]$paths[$index]
+        $items = @(& $ItemProvider $candidate)
+        if ($items.Count -eq 0) { break }
+        if ($items.Count -ne 1 -or $null -eq $items[0]) {
+            throw "$Description 路径组件检查结果不唯一：$candidate"
+        }
+        $item = $items[0]
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Description 不得经过 reparse point：$candidate"
+        }
+        if ($index -lt ($paths.Count - 1) -and -not [bool]$item.PSIsContainer) {
+            throw "$Description 的祖先路径不是目录：$candidate"
+        }
+    }
+    return $fullPath
+}
+
 function Get-HeiGeStartMenuShortcutPath {
     param([AllowNull()][string]$StartMenuRoot)
     if (-not $StartMenuRoot) { $StartMenuRoot = Get-HeiGeDefaultStartMenuRoot }
@@ -67,7 +116,10 @@ function New-DefaultHeiGeShortcut {
     $shortcut.TargetPath = $Target
     $shortcut.WorkingDirectory = $WorkingDirectory
     $shortcut.Description = $Description
-    $shortcut.WindowStyle = 1
+    $shortcut.Arguments = $script:HeiGeStartMenuArguments
+    $shortcut.WindowStyle = $script:HeiGeStartMenuWindowStyle
+    $shortcut.Hotkey = $script:HeiGeStartMenuHotkey
+    $shortcut.IconLocation = $script:HeiGeStartMenuIconLocation
     $shortcut.Save()
 }
 
@@ -78,6 +130,11 @@ function Read-DefaultHeiGeShortcut {
     return [pscustomobject][ordered]@{
         TargetPath = [string]$shortcut.TargetPath
         WorkingDirectory = [string]$shortcut.WorkingDirectory
+        Description = [string]$shortcut.Description
+        Arguments = [string]$shortcut.Arguments
+        WindowStyle = [int]$shortcut.WindowStyle
+        Hotkey = [string]$shortcut.Hotkey
+        IconLocation = [string]$shortcut.IconLocation
     }
 }
 
@@ -159,6 +216,14 @@ function Get-HeiGeShortcutObservation {
     if ($observed.Count -ne 1 -or $null -eq $observed[0]) {
         throw "shortcut inspection result is not unique"
     }
+    foreach ($name in @(
+        "TargetPath", "WorkingDirectory", "Description", "Arguments",
+        "WindowStyle", "Hotkey", "IconLocation"
+    )) {
+        if ($observed[0].PSObject.Properties.Name -notcontains $name) {
+            throw "shortcut inspection result is missing $name"
+        }
+    }
     if (-not (Test-HeiGeSamePath -Left ([string]$observed[0].TargetPath) -Right $ExpectedTarget)) {
         throw "shortcut target path mismatch"
     }
@@ -166,11 +231,31 @@ function Get-HeiGeShortcutObservation {
         -Left ([string]$observed[0].WorkingDirectory) -Right $ExpectedWorkingDirectory)) {
         throw "shortcut working directory mismatch"
     }
+    if ([string]$observed[0].Description -cne $script:HeiGeStartMenuDescription) {
+        throw "shortcut description marker mismatch"
+    }
+    if ([string]$observed[0].Arguments -cne $script:HeiGeStartMenuArguments) {
+        throw "shortcut arguments mismatch"
+    }
+    if ([int]$observed[0].WindowStyle -ne $script:HeiGeStartMenuWindowStyle) {
+        throw "shortcut window style mismatch"
+    }
+    if ([string]$observed[0].Hotkey -cne $script:HeiGeStartMenuHotkey) {
+        throw "shortcut hotkey mismatch"
+    }
+    if ([string]$observed[0].IconLocation -cne $script:HeiGeStartMenuIconLocation) {
+        throw "shortcut icon location mismatch"
+    }
     return [pscustomobject][ordered]@{
         Path = $Path
         Sha256 = $beforeHash
         TargetPath = [string]$observed[0].TargetPath
         WorkingDirectory = [string]$observed[0].WorkingDirectory
+        Description = [string]$observed[0].Description
+        Arguments = [string]$observed[0].Arguments
+        WindowStyle = [int]$observed[0].WindowStyle
+        Hotkey = [string]$observed[0].Hotkey
+        IconLocation = [string]$observed[0].IconLocation
     }
 }
 
@@ -225,6 +310,8 @@ function Assert-HeiGeStartMenuParticipant {
         -Path ([string]$Participant.InstallRoot) -Description "安装目录"
     $startMenuRoot = Get-HeiGeStartMenuFullPath `
         -Path ([string]$Participant.StartMenuRoot) -Description "开始菜单目录"
+    Assert-HeiGeNoReparsePathComponents -Path $installRoot -Description "安装目录" | Out-Null
+    Assert-HeiGeNoReparsePathComponents -Path $startMenuRoot -Description "开始菜单目录" | Out-Null
     $commonPrograms = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonPrograms)
     if ($commonPrograms -and
         (Test-HeiGePathAtOrWithin -Root $commonPrograms -Path $startMenuRoot)) {
@@ -236,6 +323,12 @@ function Assert-HeiGeStartMenuParticipant {
     $workingDirectory = Split-Path $targetPath -Parent
     $transactionPaths = Get-HeiGeStartMenuTransactionPaths `
         -ShortcutPath $shortcutPath -TransactionId ($transactionGuid.ToString("D"))
+    foreach ($path in @(
+        $shortcutPath, $folderPath, $targetPath, $workingDirectory,
+        $transactionPaths.StagePath, $transactionPaths.BackupPath
+    )) {
+        Assert-HeiGeNoReparsePathComponents -Path $path -Description "Start Menu participant 路径" | Out-Null
+    }
     foreach ($check in @(
         @("ShortcutPath", $shortcutPath, [string]$Participant.ShortcutPath),
         @("FolderPath", $folderPath, [string]$Participant.FolderPath),
@@ -269,18 +362,21 @@ function Assert-HeiGeStartMenuParticipant {
 
 function Assert-HeiGeStartMenuFolder {
     param([Parameter(Mandatory = $true)][string]$StartMenuRoot)
+    Assert-HeiGeNoReparsePathComponents -Path $StartMenuRoot -Description "开始菜单目录" | Out-Null
     $commonPrograms = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonPrograms)
     if ($commonPrograms -and
         (Test-HeiGePathAtOrWithin -Root $commonPrograms -Path $StartMenuRoot)) {
         throw "禁止写入机器级开始菜单：$StartMenuRoot"
     }
     [System.IO.Directory]::CreateDirectory($StartMenuRoot) | Out-Null
+    Assert-HeiGeNoReparsePathComponents -Path $StartMenuRoot -Description "开始菜单目录" | Out-Null
     $startMenuItem = Get-Item -LiteralPath $StartMenuRoot -Force -ErrorAction Stop
     if (($startMenuItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "开始菜单目录不能是 reparse point：$StartMenuRoot"
     }
     $folder = Join-Path $StartMenuRoot "HeiGe Codex Skin Studio"
     [System.IO.Directory]::CreateDirectory($folder) | Out-Null
+    Assert-HeiGeNoReparsePathComponents -Path $folder -Description "开始菜单快捷方式目录" | Out-Null
     $folderItem = Get-Item -LiteralPath $folder -Force -ErrorAction Stop
     if (($folderItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "开始菜单快捷方式目录不能是 reparse point：$folder"
@@ -324,27 +420,39 @@ function Remove-HeiGePreparedStartMenuFolders {
 function Prepare-HeiGeStartMenuShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [AllowNull()][string]$ValidationRoot,
         [AllowNull()][string]$StartMenuRoot,
         [AllowNull()][string]$TransactionId,
         [scriptblock]$CreateShortcutProvider,
         [scriptblock]$ReadShortcutProvider
     )
     $resolvedInstallRoot = Get-HeiGeStartMenuFullPath -Path $InstallRoot -Description "安装目录"
-    if (-not (Test-Path -LiteralPath $resolvedInstallRoot -PathType Container)) {
-        throw "安装目录不存在：$resolvedInstallRoot"
+    Assert-HeiGeNoReparsePathComponents -Path $resolvedInstallRoot -Description "安装目录" | Out-Null
+    if (Test-Path -LiteralPath $resolvedInstallRoot) {
+        $installItem = Get-Item -LiteralPath $resolvedInstallRoot -Force -ErrorAction Stop
+        if (-not $installItem.PSIsContainer -or
+            ($installItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "安装目录不安全：$resolvedInstallRoot"
+        }
     }
-    $installItem = Get-Item -LiteralPath $resolvedInstallRoot -Force -ErrorAction Stop
-    if (($installItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "安装目录不能是 reparse point：$resolvedInstallRoot"
+    if (-not $ValidationRoot) { $ValidationRoot = $resolvedInstallRoot }
+    $resolvedValidationRoot = Get-HeiGeStartMenuFullPath `
+        -Path $ValidationRoot -Description "验证目录"
+    Assert-HeiGeNoReparsePathComponents -Path $resolvedValidationRoot -Description "验证目录" | Out-Null
+    if (-not (Test-Path -LiteralPath $resolvedValidationRoot -PathType Container)) {
+        throw "验证目录不存在：$resolvedValidationRoot"
+    }
+    $validationTarget = Join-Path $resolvedValidationRoot "scripts\windows\enable-skin.bat"
+    Assert-HeiGeNoReparsePathComponents -Path $validationTarget -Description "快捷方式验证目标" | Out-Null
+    if (-not (Test-Path -LiteralPath $validationTarget -PathType Leaf)) {
+        throw "快捷方式验证目标不存在：$validationTarget"
+    }
+    $validationTargetItem = Get-Item -LiteralPath $validationTarget -Force -ErrorAction Stop
+    if (($validationTargetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "快捷方式验证目标不能是 reparse point：$validationTarget"
     }
     $target = Join-Path $resolvedInstallRoot "scripts\windows\enable-skin.bat"
-    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
-        throw "快捷方式目标不存在：$target"
-    }
-    $targetItem = Get-Item -LiteralPath $target -Force -ErrorAction Stop
-    if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "快捷方式目标不能是 reparse point：$target"
-    }
+    Assert-HeiGeNoReparsePathComponents -Path $target -Description "快捷方式最终目标" | Out-Null
 
     if (-not $TransactionId) { $TransactionId = [guid]::NewGuid().ToString("D") }
     $guidValue = [guid]::Empty
@@ -355,6 +463,7 @@ function Prepare-HeiGeStartMenuShortcut {
     }
     if (-not $StartMenuRoot) { $StartMenuRoot = Get-HeiGeDefaultStartMenuRoot }
     $resolvedStartMenuRoot = Get-HeiGeStartMenuFullPath -Path $StartMenuRoot -Description "开始菜单目录"
+    Assert-HeiGeNoReparsePathComponents -Path $resolvedStartMenuRoot -Description "开始菜单目录" | Out-Null
     $startMenuRootPriorExisted = Test-Path -LiteralPath $resolvedStartMenuRoot
     $folderPath = Join-Path $resolvedStartMenuRoot "HeiGe Codex Skin Studio"
     $folderPriorExisted = Test-Path -LiteralPath $folderPath
@@ -395,7 +504,7 @@ function Prepare-HeiGeStartMenuShortcut {
         }
     }
 
-    $description = "HeiGe 皮肤启动器。关闭常驻后，下次需要时可从开始菜单再次拉起。"
+    $description = $script:HeiGeStartMenuDescription
     if (-not $CreateShortcutProvider) {
         $CreateShortcutProvider = {
             param($Path, $Target, $WorkingDirectory, $Description)
@@ -575,8 +684,10 @@ function Rollback-HeiGeStartMenuShortcut {
         }
         Remove-Item -LiteralPath $participant.StagePath -Force
     }
-    if (Test-Path -LiteralPath $participant.BackupPath) {
-        throw "Start Menu rollback left a backup shortcut"
+    foreach ($path in @($participant.StagePath, $participant.BackupPath)) {
+        if (Test-Path -LiteralPath $path) {
+            throw "Start Menu rollback left a transaction artifact: $path"
+        }
     }
     Remove-HeiGePreparedStartMenuFolders -FolderPath $participant.FolderPath `
         -FolderPriorExisted ([bool]$participant.FolderPriorExisted) `
@@ -637,12 +748,15 @@ function Remove-HeiGeStartMenuShortcut {
         [scriptblock]$ReadShortcutProvider
     )
     $resolvedInstallRoot = Get-HeiGeStartMenuFullPath -Path $InstallRoot -Description "安装目录"
+    Assert-HeiGeNoReparsePathComponents -Path $resolvedInstallRoot -Description "安装目录" | Out-Null
     if (-not $StartMenuRoot) { $StartMenuRoot = Get-HeiGeDefaultStartMenuRoot }
     $resolvedStartMenuRoot = Get-HeiGeStartMenuFullPath -Path $StartMenuRoot -Description "开始菜单目录"
+    Assert-HeiGeNoReparsePathComponents -Path $resolvedStartMenuRoot -Description "开始菜单目录" | Out-Null
     $shortcutPath = Get-HeiGeStartMenuShortcutPath -StartMenuRoot $resolvedStartMenuRoot
     if (-not (Test-Path -LiteralPath $shortcutPath)) {
         return [pscustomobject][ordered]@{ PriorExisted = $false; Removed = $false; VerifiedAbsent = $true }
     }
+    Assert-HeiGeNoReparsePathComponents -Path $shortcutPath -Description "开始菜单快捷方式" | Out-Null
     $target = Join-Path $resolvedInstallRoot "scripts\windows\enable-skin.bat"
     $workingDirectory = Split-Path $target -Parent
     Get-HeiGeShortcutObservation -Path $shortcutPath -ExpectedTarget $target `
@@ -656,12 +770,14 @@ function Remove-HeiGeStartMenuShortcut {
 function Install-HeiGeStartMenuShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [AllowNull()][string]$ValidationRoot,
         [AllowNull()][string]$StartMenuRoot,
         [scriptblock]$CreateShortcutProvider,
         [scriptblock]$ReadShortcutProvider
     )
     $participant = Prepare-HeiGeStartMenuShortcut -InstallRoot $InstallRoot `
-        -StartMenuRoot $StartMenuRoot -CreateShortcutProvider $CreateShortcutProvider `
+        -ValidationRoot $ValidationRoot -StartMenuRoot $StartMenuRoot `
+        -CreateShortcutProvider $CreateShortcutProvider `
         -ReadShortcutProvider $ReadShortcutProvider
     try {
         Publish-HeiGeStartMenuShortcut -Participant $participant `

@@ -157,14 +157,21 @@ function Unregister-HeiGeEntrypointTask {
 function Invoke-HeiGeApplyWithContext {
     param(
         [Parameter(Mandatory = $true)]$Context,
-        [Parameter(Mandatory = $true)][string]$Theme,
+        [AllowNull()][string]$Theme,
         [Parameter(Mandatory = $true)][int]$Port,
         [scriptblock]$StartCdpProvider,
         [scriptblock]$CliProvider
     )
     Start-HeiGeEntrypointCdp -Context $Context -Port $Port -StartCdpProvider $StartCdpProvider
+    $arguments = @("apply")
+    if ([string]::IsNullOrWhiteSpace($Theme)) {
+        $arguments += "--prefer-stored"
+    } else {
+        $arguments += @("--theme", $Theme)
+    }
+    $arguments += @("--port", [string]$Port)
     $result = Invoke-HeiGeContextCli -Context $Context `
-        -Arguments @("apply", "--theme", $Theme, "--port", [string]$Port) -CliProvider $CliProvider
+        -Arguments $arguments -CliProvider $CliProvider
     Assert-HeiGeModeResult -Result $result -Expected "active"
     return $result
 }
@@ -197,13 +204,16 @@ function Invoke-HeiGeApplyFlow {
 function Invoke-HeiGeEnableSkinFlow {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Theme,
+        [AllowNull()][string]$Theme,
         [ValidateRange(1024, 65535)][int]$Port = 9341,
         [scriptblock]$ContextProvider,
         [scriptblock]$StartCdpProvider,
         [scriptblock]$CliProvider,
         [scriptblock]$UnregisterProvider
     )
+    if ($PSBoundParameters.ContainsKey("Theme") -and [string]::IsNullOrWhiteSpace($Theme)) {
+        throw "Theme 显式传入时不能为空。"
+    }
     $context = Get-HeiGeFlowContext -Root $Root -ContextProvider $ContextProvider
     Invoke-HeiGeApplyWithContext -Context $context -Theme $Theme -Port $Port `
         -StartCdpProvider $StartCdpProvider -CliProvider $CliProvider | Out-Null
@@ -242,6 +252,11 @@ function Invoke-HeiGeEnableSkinFlow {
         Mode = "active"
         PersistenceEnabled = $true
         Theme = $Theme
+        ThemeSelection = if ([string]::IsNullOrWhiteSpace($Theme)) {
+            "stored-or-default"
+        } else {
+            "explicit"
+        }
         Completion = "complete"
     }
 }
@@ -306,27 +321,48 @@ function Invoke-HeiGeRestoreFlow {
         [Parameter(Mandatory = $true)][string]$Root,
         [ValidateRange(1024, 65535)][int]$Port = 9341,
         [scriptblock]$ContextProvider,
-        [scriptblock]$RequireCdpProvider,
+        [scriptblock]$CdpStatusProvider,
         [scriptblock]$CliProvider,
         [scriptblock]$UnregisterProvider,
         [scriptblock]$RestartNativeProvider
     )
     $context = Get-HeiGeFlowContext -Root $Root -ContextProvider $ContextProvider
-    Require-HeiGeEntrypointCdp -Context $context -Port $Port -RequireCdpProvider $RequireCdpProvider
+    $hasExactCdp = if ($CdpStatusProvider) {
+        [bool](& $CdpStatusProvider $context $Port)
+    } else {
+        Test-Cdp -Port $Port -App $context.App
+    }
     $disabled = Invoke-HeiGeContextCli -Context $context `
         -Arguments @("set-persistence", "false", "--port", [string]$Port) -CliProvider $CliProvider
     Assert-HeiGePersistenceResult -Result $disabled -Expected $false
-    $paused = Invoke-HeiGeContextCli -Context $context `
-        -Arguments @("pause", "--port", [string]$Port) -CliProvider $CliProvider
-    Assert-HeiGeModeResult -Result $paused -Expected "paused"
+    $offlineMode = $null
+    if ($disabled.PSObject.Properties.Name -contains "mode") {
+        $candidateMode = [string]$disabled.mode
+        if ($candidateMode -cne "closed" -and $candidateMode -cne "native") {
+            throw "离线关闭常驻返回了未知模式：$candidateMode"
+        }
+        $offlineMode = $candidateMode
+        $hasExactCdp = $false
+    } elseif (-not $hasExactCdp) {
+        # CDP may have appeared after the read-only probe. A result without an offline mode
+        # proves the CLI used the exact live-controller path, so clean and restart that process.
+        $hasExactCdp = $true
+    }
+    if ($hasExactCdp) {
+        $paused = Invoke-HeiGeContextCli -Context $context `
+            -Arguments @("pause", "--port", [string]$Port) -CliProvider $CliProvider
+        Assert-HeiGeModeResult -Result $paused -Expected "paused"
+    }
     Unregister-HeiGeEntrypointTask -Context $context -UnregisterProvider $UnregisterProvider | Out-Null
-    if ($RestartNativeProvider) {
-        & $RestartNativeProvider $context $Port | Out-Null
-    } else {
-        Restart-CodexWithoutCdp -AppInfo $context.App -Port $Port
+    if ($hasExactCdp) {
+        if ($RestartNativeProvider) {
+            & $RestartNativeProvider $context $Port | Out-Null
+        } else {
+            Restart-CodexWithoutCdp -AppInfo $context.App -Port $Port
+        }
     }
     return [pscustomobject][ordered]@{
-        Mode = "restoring"
+        Mode = if ($hasExactCdp) { "restoring" } else { $offlineMode }
         PersistenceEnabled = $false
         Completion = "complete"
     }
