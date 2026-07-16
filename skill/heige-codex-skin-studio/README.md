@@ -1,3 +1,23 @@
 # HeiGe Codex Skin Studio Skill
 
-这个 Skill 把「给图片或描述，快速换 Codex 皮肤」交给 Codex 执行。默认包含 `Miku 488137` 预设，换肤引擎只在本机通过 CDP 注入 CSS。
+这个 Skill 支持 macOS 与 Windows，通过本机 CDP 注入完成 Codex Desktop 换肤，不修改 `app.asar`、应用签名或二进制文件。
+
+## 安装入口
+
+- macOS：运行 `scripts/install.command`。Agent 安装时应使用 `HEIGE_SKIP_APPLY=1`。
+- Windows PowerShell：运行 `scripts\install.ps1 -SkipApply`。
+- Windows 图形入口：双击 `scripts\install.bat`。
+
+安装后，macOS 使用 `$HOME/.codex/heige-codex-skin-studio`，Windows 使用 `$HOME\.codex\heige-codex-skin-studio`。
+
+## 用户可控的常驻
+
+顶部菜单的「皮肤常驻」开关决定下次启动是否继续使用皮肤。关闭后，当前会话仍保留皮肤，下次启动恢复原生界面。以后可在 macOS 打开本地应用「HeiGe 皮肤启动器」，或在 Windows 开始菜单打开「HeiGe 皮肤启动器」重新启用。也可向 Codex 说「启用 HeiGe 皮肤」。
+
+`apply` 只改变当前会话，不改变常驻选择。启用与完整恢复可能让 Codex 正常重启，执行前要先告知用户。`status` 严格只读，不应启动、退出、重启或注入 Codex。
+
+## Windows 证据边界
+
+自动化门禁要求在 `windows-latest` 上同时通过 Windows PowerShell 5.1 与 PowerShell 7 测试，覆盖解析、Node.js 22、当前用户 Scheduled Task、入口语义、编码和中文空格路径。真实任务集成测试只使用 GUID 测试名，不触碰生产任务。
+
+Microsoft Store 真机待验证。自动化测试不能替代真实 Store/MSIX 安装上的 AUMID 激活与 CDP 参数传递验收。

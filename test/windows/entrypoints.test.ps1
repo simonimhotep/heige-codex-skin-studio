@@ -13,6 +13,11 @@ $script:FakeNode = Join-Path $script:InstallRoot "runtime\node.exe"
 $script:FakeCli = Join-Path $script:InstallRoot "src\cli.mjs"
 $script:FakeController = Join-Path $script:InstallRoot "scripts\windows\controller.ps1"
 $script:EnableBat = Join-Path $script:InstallRoot "scripts\windows\enable-skin.bat"
+$script:SkillRoot = Join-Path $script:RepositoryRoot "skill\heige-codex-skin-studio"
+$script:SkillInstallPs1 = Join-Path $script:SkillRoot "scripts\install.ps1"
+$script:SkillInstallBat = Join-Path $script:SkillRoot "scripts\install.bat"
+$script:SkillInstructions = Join-Path $script:SkillRoot "SKILL.md"
+$script:SkillReadme = Join-Path $script:SkillRoot "README.md"
 foreach ($path in @($script:FakeNode, $script:FakeCli, $script:FakeController, $script:EnableBat)) {
     New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
     New-Item -ItemType File -Path $path -Force | Out-Null
@@ -474,6 +479,58 @@ try {
             )
             Assert-False ($text -match '(?<!\r)\n')
         }
+    }
+
+    Test-Case "Packaged Skill routes macOS and Windows to platform-specific installers" {
+        $skill = [System.IO.File]::ReadAllText($script:SkillInstructions)
+        $readme = [System.IO.File]::ReadAllText($script:SkillReadme)
+        foreach ($text in @($skill, $readme)) {
+            Assert-Match 'macOS' $text
+            Assert-Match 'Windows' $text
+            Assert-Match 'install\.command' $text
+            Assert-Match 'install\.ps1' $text
+            Assert-Match 'install\.bat' $text
+            Assert-Match '正常重启' $text
+            Assert-Match 'status[^\r\n]*只读|只读[^\r\n]*status' $text
+            Assert-Match 'HeiGe 皮肤启动器' $text
+        }
+    }
+
+    Test-Case "Packaged Skill removes obsolete persistence guidance" {
+        $combined = [System.IO.File]::ReadAllText($script:SkillInstructions) + "`n" +
+            [System.IO.File]::ReadAllText($script:SkillReadme)
+        Assert-False ($combined -match 'enable-persist|disable-persist|10\s*分钟冷却|看门狗')
+        Assert-False ($combined -match '当前只支持\s*macOS|不处理\s*Windows')
+        Assert-False ($combined -match '重启即成功|重启后绝对不要重试')
+    }
+
+    Test-Case "Skill documents automated Windows evidence separately from Store validation" {
+        $skill = [System.IO.File]::ReadAllText($script:SkillInstructions)
+        Assert-Match 'Windows PowerShell 5\.1' $skill
+        Assert-Match 'PowerShell 7' $skill
+        Assert-Match 'Microsoft Store 真机待验证' $skill
+        Assert-Match 'GUID' $skill
+    }
+
+    Test-Case "Windows Skill installer forwards only to the packaged Windows payload" {
+        Assert-True (Test-Path -LiteralPath $script:SkillInstallPs1 -PathType Leaf)
+        $source = [System.IO.File]::ReadAllText($script:SkillInstallPs1)
+        Assert-False ($source -match '/Applications|/usr/bin/open|osascript|launchctl')
+        Assert-Match 'payload' $source
+        Assert-Match 'scripts\\windows\\install\.ps1' $source
+        Assert-Match '\[string\]\$InstallRoot' $source
+        Assert-Match '\[string\]\$StartMenuRoot' $source
+        Assert-Match '\[switch\]\$SkipApply' $source
+        Assert-Match '@PSBoundParameters' $source
+    }
+
+    Test-Case "Packaged Windows installers retain Windows-compatible encoding and exit status" {
+        $psBytes = [System.IO.File]::ReadAllBytes($script:SkillInstallPs1)
+        Assert-Equal @(0xef, 0xbb, 0xbf) @($psBytes[0], $psBytes[1], $psBytes[2])
+        $bat = [System.IO.File]::ReadAllText($script:SkillInstallBat)
+        Assert-False ($bat -match '(?<!\r)\n')
+        Assert-Match 'set "HEIGE_EXIT=%ERRORLEVEL%"' $bat
+        Assert-Match 'exit /b %HEIGE_EXIT%' $bat
     }
 } finally {
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue

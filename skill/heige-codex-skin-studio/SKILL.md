@@ -1,93 +1,74 @@
 ---
 name: heige-codex-skin-studio
-description: 在 macOS 上用一张本地图片或 Codex 生成的图片快速制作、应用、暂停 Codex Desktop 皮肤。用户提到 Codex 换肤、主题、皮肤主图、初音未来预设或 Miku Future 宠物时使用。
+description: Use when 用户希望在 macOS 或 Windows 安装、制作、应用、暂停、恢复或设置 HeiGe Codex Desktop 皮肤常驻。
 ---
 
 # HeiGe Codex Skin Studio
 
-目标是快速完成换肤。不要扩展成设计平台，不要拆分多层素材，不要修改 `app.asar`。
+通过本机 CDP 注入为 Codex Desktop 换肤，不修改 `app.asar`、应用签名或二进制文件。
+
+## 必须遵守
+
+1. 先确认当前是 macOS 还是 Windows，只运行对应平台的入口。
+2. 安装阶段跳过自动应用，先让安装交易完整结束。
+3. `status` 是只读检查。不得用 `apply`、`enable-skin` 或重启来代替状态检查。
+4. 执行启用或完整恢复前，先告知用户 Codex 可能正常重启。以脚本返回的 ACK 或明确错误为准，不把「看到重启」当成成功证据。
+5. 失败后不做无界重试。保留原错误与 `doctor` 输出，再决定下一步。
 
 ## 首次安装
 
-运行：
+macOS：
 
 ```bash
-open "$HOME/.agents/skills/heige-codex-skin-studio/scripts/install.command"
+HEIGE_SKIP_APPLY=1 "$HOME/.agents/skills/heige-codex-skin-studio/scripts/install.command"
 ```
 
-安装位置固定为 `~/.codex/heige-codex-skin-studio`。
+Windows PowerShell：
 
-## 用户给了一张图片
+```powershell
+& "$HOME\.agents\skills\heige-codex-skin-studio\scripts\install.ps1" -SkipApply
+```
 
-1. 确认图片是非空的 PNG、JPG、JPEG 或 WebP。
-2. 使用 Codex 自带的 Node 创建主题：
+Windows 用户也可双击 `scripts\install.bat`。Windows 入口只转发到包内 `payload\scripts\windows\install.ps1`，不运行 macOS 命令。
+
+默认稳定安装目录：
+
+- macOS：`$HOME/.codex/heige-codex-skin-studio`
+- Windows：`$HOME\.codex\heige-codex-skin-studio`
+
+## 应用与常驻语义
+
+- `apply`：仅应用当前会话，不改变下次启动的常驻选择。
+- 顶部菜单「皮肤常驻」开关：打开后下次启动继续使用；关闭后本次继续使用，下次启动恢复原生界面。
+- 关闭后如需重新启用，macOS 打开 `$HOME/Applications/HeiGe 皮肤启动器.app`；Windows 从开始菜单打开「HeiGe 皮肤启动器」。也可向 Codex 说「启用 HeiGe 皮肤」。
+- 启动器未显式指定主题时，优先恢复上次非原生主题，只有没有历史选择时才使用 `miku-488137`。
+
+macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、`scripts/pause.command`、`scripts/resume.command` 和 `scripts/restore.command`。Windows 对应入口是 `scripts\windows` 下的同名 `.ps1` 或 `.bat`。
+
+## 状态与诊断
+
+macOS 只读状态：
 
 ```bash
-"/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node" \
-  "$HOME/.codex/heige-codex-skin-studio/src/cli.mjs" create \
-  --image "/绝对路径/hero.webp" --name "主题名"
+"$HOME/.codex/heige-codex-skin-studio/scripts/lib/run-cli.zsh" status --port 9341
 ```
 
-3. 从返回 JSON 读取 `id`。
-4. 告知用户应用操作会正常退出并重新打开当前 Codex。
-5. 用户已要求立即应用时，打开应用脚本并传入 `id`：
+Windows 只读后台任务状态：
 
-```bash
-open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "主题-id"
+```powershell
+& "$HOME\.codex\heige-codex-skin-studio\scripts\windows\controller.ps1" -Action status -Port 9341
 ```
 
-## 用户只给了创意描述
+注入异常时运行 `doctor`，保留完整 JSON，不循环调用可能触发正常重启的入口。CDP 只允许侦听 `127.0.0.1`，默认端口是 `9341`。
 
-先使用当前环境可用的 `imagegen` 技能生成一张完整的横向 UI 主图。画面要预留左侧导航和底部输入区的可读空间，不要把按钮、菜单文字或聊天内容烘焙进图片。拿到本地图片路径后，继续执行「用户给了一张图片」。
+## 图片与主题
 
-图片生成不可用时，直接请用户给一张本地图片，不要要求额外 API Key。
+用户给出图片时，先验证非空 PNG、JPG、JPEG 或 WebP，再用已验证的 Node.js 22 或更高版本运行 `src/cli.mjs create --image <绝对路径> --name <主题名>`。读取 JSON 返回的 `id`，传给对应平台的 `apply` 入口。
 
-## 内置预设
+用户只给创意描述时，先用当前可用的 `imagegen` 生成横向 UI 主图。为左侧导航和底部输入区留出可读空间，不要把按钮、菜单文字或聊天内容烘焙到图片中。
 
-默认预设是高精度定制的 `miku-488137`，另有 9 个轻量预设（配色 + 背景底图）：
-`genshin-dawn`、`genshin-night`、`wuthering-tide`、`wuthering-echo`、`naruto-hokage`、`naruto-sasuke`、`deepspace-dawn`、`deepspace-star`、`dalao-dianyan`（大佬 · 点烟彩蛋）。
+## Windows 验证边界
 
-```bash
-open "$HOME/.codex/heige-codex-skin-studio/scripts/apply.command" --args "miku-488137"
-```
+自动化测试要求在 `windows-latest` 上同时用 Windows PowerShell 5.1 和 PowerShell 7 验证确定性应用解析、Node.js 22 门禁、当前用户 Scheduled Task、入口语义、UTF-8 BOM、BAT CRLF，以及中文和空格路径。真实 Scheduled Task 集成测试只能使用 GUID 测试任务名，不得触碰生产任务。
 
-应用任意一个后，其余预设都在顶部中间的 🎨 菜单里一键切换。
-
-## 给在 Codex 内运行的 Agent 的关键规则
-
-应用皮肤会正常退出并重启 Codex 本体，你的当前任务会被中断。**重启即成功**，这是预期行为：
-
-1. 安装阶段一律用 `HEIGE_SKIP_APPLY=1` 环境变量跳过自动应用。
-2. 把 apply 作为整个任务的最后一步执行，执行前告知用户「Codex 即将重启，重启后皮肤生效」。
-3. 重启后绝对不要重试 install 或 apply，否则会造成无限重启循环。验证交给用户肉眼确认，或由 Codex 外部的工具执行。
-4. 用户想要皮肤「常驻/重启不丢」时，让用户运行 `scripts/enable-persist.command`（macOS）。它装一个带 10 分钟冷却的 launchd 看门狗负责自动恢复，Codex 内的 Agent 仍然不得自行重试 apply。关闭用 `scripts/disable-persist.command`。
-5. 若重启后调试端口一直不开（apply 报端口未就绪），不要循环排查。两种情况：老实例没退干净接管了新实例（让用户手动 Cmd+Q 完全退出后重跑脚本）；参数在命令行里但端口仍不开（当前 Codex 版本可能禁用了调试端口，让用户带版本号到 GitHub 开 Issue）。排障第一步是跑 `node src/cli.mjs doctor`：输出里的 diagnosis 字段直接给出分类结论（ok / flag-present-port-closed / running-no-flag / not-running），报 Issue 时把整份 doctor JSON 附上。脚本报错信息已内置各类指引，原样转述给用户即可。
-
-## 界面内切换菜单
-
-应用任意主题后，Codex 顶部中间会出现一个 🎨 按钮。点开可以在所有已装主题和原生界面之间即时切换，不需要再跑命令。菜单底部的「隐藏此按钮」会把按钮收成一颗半透明小圆点（状态跨重启保留），点小圆点即可恢复完整按钮。新建主题后重新执行一次 `apply.command`，菜单列表会刷新。
-
-菜单里的「＋ 自定义图片」支持用户直接上传本地图片：页面内自动压缩、按图片风格提取配色并立即应用，结果存在 Codex 本地存储里，重启后重新 apply 会自动回到菜单；菜单里该行行尾的 × 可随时删除。自定义槽位只有一个，再次上传会覆盖上一张。用户只是想快速试一张图时优先推荐这个入口；要做成可分发的正式主题再走 `create` 命令。
-
-## 暂停或恢复原界面
-
-```bash
-open "$HOME/.codex/heige-codex-skin-studio/scripts/pause.command"
-```
-
-这里只移除实时注入的 `<style>` 和切换菜单，因为工具从未修改 Codex 应用文件。
-
-## 可选宠物
-
-仅当用户明确需要 `Miku Future` 宠物时运行：
-
-```bash
-open "$HOME/.codex/heige-codex-skin-studio/custom-pet/install.command"
-```
-
-## 边界
-
-- 当前只支持 macOS。
-- CDP 固定监听 `127.0.0.1`，默认端口 `9341`。
-- Codex 完整重载 renderer 后需要重新应用一次。
-- 不修改应用包，不做 ASAR 注入，不处理 Windows 或 Linux。
+Microsoft Store 真机待验证：自动化证据不证明真实 Store/MSIX 安装的 AUMID 激活能按预期传递 CDP 参数。在真机证据补齐前，不宣称该路径已完整验证。
