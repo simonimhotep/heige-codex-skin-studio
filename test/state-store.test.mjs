@@ -145,6 +145,45 @@ test("corrupt state fails closed without generating replacement state", async (t
   assert.equal(await readFile(statePath, "utf8"), "{bad");
 });
 
+test("private state readers reject files larger than 64 KiB before parsing", async (t) => {
+  const { statePath, sessionPath, transitionPath } = await fixture(t);
+  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
+  await chmod(dirname(statePath), 0o700);
+  const oversized = " ".repeat(64 * 1024 + 1);
+  for (const [path, read] of [
+    [statePath, readStudioState],
+    [sessionPath, readSessionState],
+    [transitionPath, readTransitionJournal],
+  ]) {
+    await writeFile(path, oversized, { mode: 0o600 });
+    await assert.rejects(() => read(path), /65536 bytes/);
+  }
+});
+
+test("legacy theme migration rejects oversized files and final symlinks", async (t) => {
+  const { statePath, legacyThemePath, root } = await fixture(t);
+  const lease = await acquireStateLease(t, statePath);
+  const migrate = () => migrateLegacyState({
+    statePath,
+    lease,
+    legacyThemePath,
+    legacyAgentLoaded: true,
+    themeExists: async () => true,
+    randomBytes: () => Buffer.alloc(32, 5),
+  });
+
+  await writeFile(legacyThemePath, "x".repeat(257), { mode: 0o600 });
+  await assert.rejects(migrate, /256 bytes/);
+  assert.equal(await readStudioState(statePath), null);
+
+  await rm(legacyThemePath);
+  const backing = join(root, "legacy-theme-backing");
+  await writeFile(backing, `${DEFAULT_THEME_ID}\n`, { mode: 0o600 });
+  await symlink(backing, legacyThemePath);
+  await assert.rejects(migrate, /symbolic link|too many levels|\u7b26\u53f7\u94fe\u63a5/i);
+  assert.equal(await readStudioState(statePath), null);
+});
+
 test("state validation rejects unknown schemas and malformed fields", () => {
   const valid = createDefaultStudioState({ themeId: DEFAULT_THEME_ID, token: CONTROL_TOKEN });
   assert.deepEqual(valid, {

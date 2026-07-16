@@ -5,7 +5,6 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   rename,
   rm,
   unlink,
@@ -23,6 +22,7 @@ import {
   commitWithOperationLease,
   guardOperationLease,
 } from "./operation-lock.mjs";
+import { readBoundedFile } from "./resource-limits.mjs";
 
 const STATE_KEYS = [
   "schemaVersion",
@@ -61,6 +61,9 @@ const TRANSITION_NONCE = /^[A-Za-z0-9_-]{1,256}$/;
 const STATE_FILE_NAME = "state.json";
 const SESSION_FILE_NAME = "session.json";
 const TRANSITION_FILE_NAME = "transition.json";
+const MAX_PRIVATE_JSON_BYTES = 64 * 1024;
+const MAX_LEGACY_THEME_BYTES = 256;
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -369,7 +372,45 @@ async function readJson(path, { damagedMessage, validate }) {
       throw statePathError("STATE_FILE_CHANGED", "状态文件在安全检查后发生变化");
     }
     enforcePosixFileSecurity(opened, "file");
-    raw = await handle.readFile("utf8");
+    if (!Number.isSafeInteger(opened.size) || opened.size < 0) {
+      throw statePathError("STATE_FILE_SIZE_INVALID", "状态文件大小无效");
+    }
+    if (opened.size > MAX_PRIVATE_JSON_BYTES) {
+      throw statePathError(
+        "STATE_FILE_TOO_LARGE",
+        `状态文件超过 ${MAX_PRIVATE_JSON_BYTES} bytes`,
+      );
+    }
+    const buffer = Buffer.allocUnsafe(MAX_PRIVATE_JSON_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        buffer.byteLength - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_PRIVATE_JSON_BYTES) {
+      throw statePathError(
+        "STATE_FILE_TOO_LARGE",
+        `状态文件超过 ${MAX_PRIVATE_JSON_BYTES} bytes`,
+      );
+    }
+    const after = await handle.stat();
+    if (
+      after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs
+      || after.ctimeMs !== opened.ctimeMs
+      || offset !== opened.size
+    ) {
+      throw statePathError("STATE_FILE_CHANGED", "状态文件在读取期间发生变化");
+    }
+    raw = UTF8_DECODER.decode(buffer.subarray(0, offset));
   } finally {
     await handle.close();
   }
@@ -536,9 +577,17 @@ export async function migrateLegacyState({
     if (legacyAgentLoaded) {
       let legacyTheme;
       try {
-        legacyTheme = await readFile(legacyThemePath, "utf8");
+        await verifyDirectoryAncestors(dirname(legacyThemePath));
+        const snapshot = await readBoundedFile(legacyThemePath, {
+          maxBytes: MAX_LEGACY_THEME_BYTES,
+          label: "旧版主题记录",
+        });
+        legacyTheme = UTF8_DECODER.decode(snapshot.bytes);
       } catch (cause) {
-        throw new Error("旧版主题状态无效：无法读取主题文件", { cause });
+        throw new Error(
+          `旧版主题状态无效：主题文件必须是不超过 ${MAX_LEGACY_THEME_BYTES} bytes 的普通文件且不得是符号链接`,
+          { cause },
+        );
       }
       themeId = legacyTheme.trim();
       try {
