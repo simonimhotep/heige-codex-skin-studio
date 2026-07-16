@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
+  rm,
   symlink,
   utimes,
   writeFile,
@@ -12,6 +15,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createSingleImageTheme, listThemes } from "../src/theme-store.mjs";
+
+async function temporaryRoot(prefix) {
+  return realpath(await mkdtemp(join(tmpdir(), prefix)));
+}
 
 function png(width, height, bytes = 24) {
   const result = Buffer.alloc(Math.max(bytes, 24));
@@ -24,7 +31,7 @@ function png(width, height, bytes = 24) {
 }
 
 test("creates a theme from one local image without a build pipeline", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-theme-"));
+  const root = await temporaryRoot("heige-theme-");
   const image = join(root, "source.png");
   await writeFile(image, png(640, 360));
 
@@ -41,7 +48,7 @@ test("creates a theme from one local image without a build pipeline", async () =
 });
 
 test("rejects unsupported source files", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-theme-"));
+  const root = await temporaryRoot("heige-theme-");
   const image = join(root, "source.gif");
   await writeFile(image, "gif");
 
@@ -52,7 +59,7 @@ test("rejects unsupported source files", async () => {
 });
 
 test("listThemes skips well-formed JSON with a bad shape instead of crashing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-badshape-"));
+  const root = await temporaryRoot("heige-badshape-");
   await mkdir(join(root, "good"));
   await writeFile(join(root, "good", "theme.json"), JSON.stringify({ id: "good", name: "Good" }));
   await mkdir(join(root, "noname"));
@@ -65,7 +72,7 @@ test("listThemes skips well-formed JSON with a bad shape instead of crashing", a
 });
 
 test("createSingleImageTheme rejects oversized source images", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-bigimg-"));
+  const root = await temporaryRoot("heige-bigimg-");
   const big = join(root, "big.png");
   await writeFile(big, png(640, 360, 9 * 1024 * 1024));
   await assert.rejects(
@@ -75,7 +82,7 @@ test("createSingleImageTheme rejects oversized source images", async () => {
 });
 
 test("createSingleImageTheme validates magic MIME and dimensions before publishing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-invalid-source-"));
+  const root = await temporaryRoot("heige-invalid-source-");
   const storeRoot = join(root, "store");
   const mismatch = join(root, "mismatch.png");
   await writeFile(mismatch, Buffer.from("not-a-png"));
@@ -93,7 +100,7 @@ test("createSingleImageTheme validates magic MIME and dimensions before publishi
 });
 
 test("theme ids are content addressed instead of trusting size and mtime metadata", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-theme-content-id-"));
+  const root = await temporaryRoot("heige-theme-content-id-");
   const firstRoot = join(root, "first");
   const secondRoot = join(root, "second");
   await mkdir(firstRoot);
@@ -123,7 +130,7 @@ test("theme ids are content addressed instead of trusting size and mtime metadat
 });
 
 test("the same image and name produce one stable id across paths and mtimes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-theme-stable-id-"));
+  const root = await temporaryRoot("heige-theme-stable-id-");
   const first = join(root, "first.png");
   const second = join(root, "renamed.png");
   const bytes = png(640, 360, 32);
@@ -146,7 +153,7 @@ test("the same image and name produce one stable id across paths and mtimes", as
 });
 
 test("a publish failure restores an existing theme byte for byte", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-theme-rollback-"));
+  const root = await temporaryRoot("heige-theme-rollback-");
   const image = join(root, "source.png");
   const storeRoot = join(root, "themes");
   await writeFile(image, png(640, 360, 32));
@@ -167,7 +174,7 @@ test("a publish failure restores an existing theme byte for byte", async () => {
 });
 
 test("theme publication refuses a symlink collision without touching its target", async () => {
-  const root = await mkdtemp(join(tmpdir(), "heige-theme-symlink-"));
+  const root = await temporaryRoot("heige-theme-symlink-");
   const image = join(root, "source.png");
   await writeFile(image, png(640, 360, 32));
   const probe = await createSingleImageTheme({
@@ -188,4 +195,22 @@ test("theme publication refuses a symlink collision without touching its target"
     storeRoot,
   }), /符号链接|symlink/i);
   assert.equal(await readFile(join(outside, "sentinel"), "utf8"), "untouched\n");
+});
+
+test("theme publication rejects a symlinked store ancestor before creating files", async (t) => {
+  const root = await temporaryRoot("heige-theme-store-ancestor-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const image = join(root, "source.png");
+  const outside = join(root, "outside");
+  const alias = join(root, "alias");
+  await writeFile(image, png(640, 360, 32));
+  await mkdir(outside);
+  await symlink(outside, alias);
+
+  await assert.rejects(createSingleImageTheme({
+    imagePath: image,
+    name: "Ancestor Guard",
+    storeRoot: join(alias, "themes"),
+  }), /canonical|symlink|符号链接|规范/i);
+  await assert.rejects(lstat(join(outside, "themes")), /ENOENT/);
 });

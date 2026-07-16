@@ -11,6 +11,7 @@ import {
   rm,
 } from "node:fs/promises";
 import {
+  dirname,
   extname,
   isAbsolute,
   join,
@@ -32,6 +33,29 @@ const IMAGE_MIME = new Map([
 ]);
 const THEME_NAME_MAX = 80;
 
+async function requireCanonicalExistingAncestor(path) {
+  let current = path;
+  while (true) {
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+      continue;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new TypeError("主题存储路径祖先必须是真实目录且不得是符号链接");
+    }
+    if (await realpath(current) !== current) {
+      throw new TypeError("主题存储路径祖先必须是规范真实目录");
+    }
+    return;
+  }
+}
+
 function validThemeName(value) {
   if (
     typeof value !== "string"
@@ -50,6 +74,7 @@ async function requireSafeStoreRoot(storeRoot) {
     || resolve(storeRoot) !== storeRoot
     || storeRoot.includes("\0")
   ) throw new TypeError("主题存储目录必须是规范绝对路径");
+  await requireCanonicalExistingAncestor(storeRoot);
   await mkdir(storeRoot, { recursive: true, mode: 0o700 });
   const info = await lstat(storeRoot);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new TypeError("主题存储目标必须是真实目录");
@@ -57,6 +82,7 @@ async function requireSafeStoreRoot(storeRoot) {
     throw new TypeError("主题存储目录必须属于当前用户");
   }
   const canonical = await realpath(storeRoot);
+  if (canonical !== storeRoot) throw new TypeError("主题存储目录必须是规范真实路径");
   const canonicalInfo = await lstat(canonical);
   if (
     canonicalInfo.isSymbolicLink()
