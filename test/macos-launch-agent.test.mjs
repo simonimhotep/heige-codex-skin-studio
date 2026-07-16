@@ -19,6 +19,7 @@ import {
   renderControllerPlist,
   rollbackLegacyWatchdogMigration,
   rollbackStableServiceFreeze,
+  stopStableServiceFreezeForRollback,
   unregisterControllerAgent,
   wakeControllerAgent,
 } from "../src/macos-launch-agent.mjs";
@@ -427,6 +428,74 @@ async function outerMigrationJournal(deps, { decision = "undecided" } = {}) {
   await write();
   return {
     outerTransaction: { transactionId, journalPath },
+    async bind(participant) {
+      document = {
+        ...document,
+        previousNonce: document.nonce,
+        nonce: randomUUID(),
+        revision: document.revision + 1,
+        serviceParticipant: participant,
+        phase: "service-prepared",
+      };
+      await write();
+    },
+    async decide(nextDecision) {
+      document = {
+        ...document,
+        previousNonce: document.nonce,
+        nonce: randomUUID(),
+        revision: document.revision + 1,
+        decision: nextDecision,
+        phase: `${nextDecision}-decided`,
+      };
+      await write();
+    },
+  };
+}
+
+async function outerMacosInstallJournal(deps) {
+  const transactionId = randomUUID();
+  const journalPath = join(deps.stateDir, `outer-macos-${transactionId}.json`);
+  await fsPromises.mkdir(deps.stateDir, { recursive: true });
+  let document = {
+    schemaVersion: 1,
+    product: "heige-codex-skin-studio",
+    operation: "macos-install",
+    transactionId,
+    revision: 0,
+    nonce: randomUUID(),
+    previousNonce: null,
+    decision: "undecided",
+    phase: "freeze-intent",
+    createdAt: new Date().toISOString(),
+    sourceRoot: deps.stableInstallRoot,
+    targetRoot: deps.stableInstallRoot,
+    home: deps.home,
+    stateRoot: deps.stateDir,
+    activation: "pending",
+    treeParticipant: null,
+    launcherParticipant: null,
+    stateParticipant: null,
+    freezeParticipant: null,
+    ack: null,
+  };
+  const write = async () => {
+    await writeFile(journalPath, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+    await fsPromises.chmod(journalPath, 0o600);
+  };
+  await write();
+  return {
+    outerTransaction: { transactionId, journalPath },
+    async bind(participant) {
+      document = {
+        ...document,
+        previousNonce: document.nonce,
+        nonce: randomUUID(),
+        revision: document.revision + 1,
+        freezeParticipant: participant,
+      };
+      await write();
+    },
     async decide(nextDecision) {
       document = {
         ...document,
@@ -1165,6 +1234,7 @@ test("deferred legacy migration keeps recovery material until the outer commit",
   assert.equal(deps.loaded.has(deps.oldLabel), true);
   assert.equal(deps.loaded.has(deps.label), true);
 
+  await outer.bind(result.transaction);
   await outer.decide("commit");
   await finalizeLegacyWatchdogMigration(
     JSON.parse(JSON.stringify(result.transaction)),
@@ -1184,6 +1254,7 @@ test("deferred legacy migration rollback restores both services exactly", async 
     outerTransaction: outer.outerTransaction,
   });
 
+  await outer.bind(result.transaction);
   await rollbackLegacyWatchdogMigration(
     JSON.parse(JSON.stringify(result.transaction)),
     deps,
@@ -1204,7 +1275,7 @@ test("a durable outer commit decision rolls forward after a crash before partici
     ...deps,
     deferCommit: true,
     outerTransaction: outer.outerTransaction,
-  });
+  }).then((result) => outer.bind(result.transaction));
   await outer.decide("commit");
 
   const recovered = await migrateLegacyWatchdog(deps);
@@ -1239,7 +1310,7 @@ test("stable service freeze stops both attributed jobs and rollback restores the
   const deps = await fixture(t);
   await registerControllerAgent(deps);
   const controllerBytes = await readFile(deps.controllerPlistPath);
-  const outer = await outerMigrationJournal(deps);
+  const outer = await outerMacosInstallJournal(deps);
   const descriptor = await createStableServiceFreezeDescriptor({
     ...deps,
     outerTransaction: outer.outerTransaction,
@@ -1248,13 +1319,14 @@ test("stable service freeze stops both attributed jobs and rollback restores the
     ...deps,
     outerTransaction: outer.outerTransaction,
   });
+  await outer.bind(descriptor);
 
   assert.deepEqual(frozen.transaction, descriptor);
   assert.equal(frozen.servicesFrozen, 2);
   assert.equal(deps.loaded.has(deps.label), false);
   assert.equal(deps.loaded.has(deps.oldLabel), false);
-  assert.deepEqual(await readFile(deps.controllerPlistPath), controllerBytes);
-  assert.deepEqual(await readFile(deps.oldPlistPath), deps.originalPlistBytes);
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(await pathExists(deps.oldPlistPath), false);
 
   await outer.decide("rollback");
   await rollbackStableServiceFreeze(JSON.parse(JSON.stringify(descriptor)), deps);
@@ -1268,11 +1340,12 @@ test("stable service freeze stops both attributed jobs and rollback restores the
 test("stable service freeze hard crash restores both old jobs only after outer rollback", async (t) => {
   const deps = await fixture(t);
   await registerControllerAgent(deps);
-  const outer = await outerMigrationJournal(deps);
+  const outer = await outerMacosInstallJournal(deps);
   const descriptor = await createStableServiceFreezeDescriptor({
     ...deps,
     outerTransaction: outer.outerTransaction,
   });
+  await outer.bind(descriptor);
   await assert.rejects(
     prepareStableServiceFreeze({
       ...deps,
@@ -1302,7 +1375,7 @@ test("stable service freeze waits for every captured launchd PID to exit", async
     wait: async () => {},
   });
   await registerControllerAgent(deps);
-  const outer = await outerMigrationJournal(deps);
+  const outer = await outerMacosInstallJournal(deps);
   await prepareStableServiceFreeze({
     ...deps,
     outerTransaction: outer.outerTransaction,
@@ -1314,12 +1387,13 @@ test("stable service freeze waits for every captured launchd PID to exit", async
 test("stable service freeze finalize never revives the old watchdog after outer commit", async (t) => {
   const deps = await fixture(t);
   await registerControllerAgent(deps);
-  const outer = await outerMigrationJournal(deps);
+  const outer = await outerMacosInstallJournal(deps);
   const frozen = await prepareStableServiceFreeze({
     ...deps,
     outerTransaction: outer.outerTransaction,
   });
-  deps.loaded.add(deps.label);
+  await outer.bind(frozen.transaction);
+  await registerControllerAgent(deps);
   await outer.decide("commit");
   await finalizeStableServiceFreeze(
     JSON.parse(JSON.stringify(frozen.transaction)),
@@ -1328,6 +1402,97 @@ test("stable service freeze finalize never revives the old watchdog after outer 
   assert.equal(deps.loaded.has(deps.label), true, "the committed new controller remains running");
   assert.equal(deps.loaded.has(deps.oldLabel), false, "the old watchdog is never revived");
   assert.equal(await pathExists(join(deps.stateDir, "stable-service-freeze.json")), false);
+});
+
+test("stable service freeze rollback restores an overwritten Hermes controller byte-for-byte", async (t) => {
+  const deps = await fixture(t);
+  const legacy = await installKnownHermesController(deps, { mode: 0o640 });
+  const outer = await outerMacosInstallJournal(deps);
+  const descriptor = await createStableServiceFreezeDescriptor({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+  await outer.bind(descriptor);
+  await prepareStableServiceFreeze({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+  await registerControllerAgent(deps);
+  assert.notDeepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
+
+  await outer.decide("rollback");
+  await stopStableServiceFreezeForRollback(descriptor, deps);
+  await rollbackStableServiceFreeze(descriptor, deps);
+
+  assert.deepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
+  assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o640);
+  assert.equal(deps.loaded.has(deps.label), true);
+  assert.equal(deps.loaded.has(deps.oldLabel), true);
+});
+
+test("ordinary registration still refuses an existing Hermes controller without an outer freeze", async (t) => {
+  const deps = await fixture(t);
+  const legacy = await installKnownHermesController(deps, { mode: 0o640 });
+
+  await assert.rejects(
+    registerControllerAgent(deps),
+    (error) => error.code === "CONTROLLER_PRESTATE_INVALID",
+  );
+
+  assert.deepEqual(await readFile(deps.controllerPlistPath), legacy.bytes);
+  assert.equal((await stat(deps.controllerPlistPath)).mode & 0o777, 0o640);
+  assert.equal(deps.loaded.has(deps.label), true);
+});
+
+test("non-persistent freeze commit removes every trusted old service", async (t) => {
+  const deps = await fixture(t);
+  await registerControllerAgent(deps);
+  const outer = await outerMacosInstallJournal(deps);
+  const descriptor = await createStableServiceFreezeDescriptor({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+  await outer.bind(descriptor);
+  await prepareStableServiceFreeze({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+  await outer.decide("commit");
+
+  await finalizeStableServiceFreeze(descriptor, {
+    ...deps,
+    removeFrozenServices: true,
+  });
+
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(await pathExists(deps.oldPlistPath), false);
+  assert.equal(deps.loaded.has(deps.label), false);
+  assert.equal(deps.loaded.has(deps.oldLabel), false);
+});
+
+test("freeze rollback is idempotent when no pre-existing service journal exists", async (t) => {
+  const deps = await fixture(t);
+  deps.loaded.clear();
+  await rm(deps.oldPlistPath);
+  const outer = await outerMacosInstallJournal(deps);
+  const descriptor = await createStableServiceFreezeDescriptor({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+  await outer.bind(descriptor);
+  const frozen = await prepareStableServiceFreeze({
+    ...deps,
+    outerTransaction: outer.outerTransaction,
+  });
+  assert.equal(frozen.transaction, null);
+  await registerControllerAgent(deps);
+  await outer.decide("rollback");
+
+  await stopStableServiceFreezeForRollback(descriptor, deps);
+  await rollbackStableServiceFreeze(descriptor, deps);
+
+  assert.equal(await pathExists(deps.controllerPlistPath), false);
+  assert.equal(deps.loaded.has(deps.label), false);
 });
 
 test("stable service freeze refuses a foreign loaded controller before stopping either job", async (t) => {

@@ -1287,6 +1287,11 @@ async function recoverJournalUnderLock(targetRoot, { testMode } = {}) {
   return { recovered: true, action: "rollback" };
 }
 
+export async function recoverInstallTreeUnderLock({ targetRoot, testMode } = {}) {
+  targetRoot = await canonicalizeTargetRoot(targetRoot);
+  return recoverJournalUnderLock(targetRoot, { testMode });
+}
+
 export async function recoverInstallTree({ targetRoot, isProcessAlive, testMode } = {}) {
   targetRoot = await canonicalizeTargetRoot(targetRoot);
   const releaseLock = await acquireInstallLock(targetRoot, isProcessAlive);

@@ -5,6 +5,8 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { validateKnownOuterTransactionDocument } from "./outer-transaction-validator.mjs";
+
 const execFileAsync = promisify(execFileCallback);
 
 export const CONTROLLER_LAUNCH_AGENT_LABEL = "com.heige.codex-skin-controller";
@@ -18,7 +20,7 @@ const HANDSHAKE_NONCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const NOT_FOUND_CODES = new Set([3, 113, "3", "113"]);
 const PLIST_BACKUP_MAX_BYTES = 256 * 1024;
 const MIGRATION_JOURNAL_MAX_BYTES = 1024 * 1024;
-const OUTER_JOURNAL_MAX_BYTES = 128 * 1024;
+const OUTER_JOURNAL_MAX_BYTES = 256 * 1024;
 const MIGRATION_PHASES = new Set([
   "prepared",
   "after-journal",
@@ -1506,7 +1508,7 @@ async function readMigrationJournal(options, journalPath, identity) {
   return { path: journalPath, journal, snapshot };
 }
 
-async function readOuterTransactionDecision(options, outerTransaction) {
+async function readOuterTransactionDecision(options, outerTransaction, participant = null) {
   let snapshot;
   try {
     snapshot = await snapshotFile(options.fs, outerTransaction.journalPath, {
@@ -1531,55 +1533,14 @@ async function readOuterTransactionDecision(options, outerTransaction) {
   if (decoded !== `${JSON.stringify(document)}\n`) {
     throw migrationJournalError("outer transaction journal JSON is not canonical");
   }
-  const installKeys = [
-    "createdAt",
-    "decision",
-    "nonce",
-    "operation",
-    "participant",
-    "phase",
-    "previousNonce",
-    "product",
-    "revision",
-    "schemaVersion",
-    "transactionId",
-  ];
-  const lifecycleKeys = [
-    "createdAt",
-    "decision",
-    "nonce",
-    "operation",
-    "phase",
-    "previousNonce",
-    "product",
-    "revision",
-    "schemaVersion",
-    "serviceParticipant",
-    "stateParticipant",
-    "transactionId",
-  ];
-  const knownShape = document?.operation === "install-tree"
-    ? hasExactKeys(document, installKeys)
-    : document?.operation === "legacy-migration" && hasExactKeys(document, lifecycleKeys);
-  if (
-    !knownShape ||
-    document.schemaVersion !== 1 ||
-    document.product !== "heige-codex-skin-studio" ||
-    !UUID_PATTERN.test(document.transactionId) ||
-    !["undecided", "rollback", "commit"].includes(document.decision) ||
-    !Number.isSafeInteger(document.revision) ||
-    document.revision < 0 ||
-    !UUID_PATTERN.test(document.nonce) ||
-    !(document.previousNonce === null || UUID_PATTERN.test(document.previousNonce)) ||
-    typeof document.createdAt !== "string" ||
-    !Number.isFinite(Date.parse(document.createdAt))
-  ) {
-    throw migrationJournalError("outer transaction journal schema is invalid");
-  }
-  if (document.transactionId !== outerTransaction.transactionId) {
-    const error = new Error("outer transaction id does not match the migration participant");
-    error.code = "OUTER_TRANSACTION_CONFLICT";
-    throw error;
+  try {
+    validateKnownOuterTransactionDocument(document, {
+      transactionId: outerTransaction.transactionId,
+      participant,
+    });
+  } catch (cause) {
+    if (cause?.code === "OUTER_TRANSACTION_CONFLICT") throw cause;
+    throw migrationJournalError("outer transaction journal schema is invalid", cause);
   }
   await assertSnapshotCurrent(options.fs, outerTransaction.journalPath, snapshot);
   return document.decision;
@@ -1636,9 +1597,19 @@ async function recoverMigrationJournal(options, {
     oldPlistPath,
   });
   const { journal } = transaction;
+  const participant = journal.outerTransaction === undefined
+    ? null
+    : migrationParticipantDescriptor({
+      outerTransaction: journal.outerTransaction,
+      participantJournalPath: transaction.path,
+      oldLabel,
+      newLabel: options.label,
+      oldPlistPath,
+      newPlistPath: options.plistPath,
+    });
   const outerDecision = journal.outerTransaction === undefined
     ? null
-    : await readOuterTransactionDecision(options, journal.outerTransaction);
+    : await readOuterTransactionDecision(options, journal.outerTransaction, participant);
   const rollForward = journal.phase === "outer-commit-decided" ||
     (journal.phase === "awaiting-outer-commit" && outerDecision === "commit");
   const forwardState = { bytes: journal.forward.bytes, mode: 0o600 };
@@ -2507,15 +2478,28 @@ export async function prepareStableServiceFreeze(input = {}) {
     ),
   };
   const transaction = await createMigrationJournal(options, journalPath, journal);
+  const services = [
+    {
+      label: options.label,
+      path: controllerPlistPath,
+      snapshot: controllerSnapshot,
+      job: controllerJob,
+      backup: journal.controllerBackup,
+    },
+    {
+      label: watchdogLabel,
+      path: watchdogPlistPath,
+      snapshot: watchdogSnapshot,
+      job: watchdogJob,
+      backup: journal.watchdogBackup,
+    },
+  ];
   const frozen = [];
   try {
     if (options.hardCrashAt === "after-freeze-journal") {
       throw injectedHardCrash("after-freeze-journal");
     }
-    for (const service of [
-      { label: options.label, path: controllerPlistPath, snapshot: controllerSnapshot, job: controllerJob },
-      { label: watchdogLabel, path: watchdogPlistPath, snapshot: watchdogSnapshot, job: watchdogJob },
-    ]) {
+    for (const service of services) {
       await assertSnapshotCurrent(options.fs, service.path, service.snapshot);
       if (service.job.loaded) {
         await bootout(options, service.label, { knownLoaded: true });
@@ -2524,6 +2508,14 @@ export async function prepareStableServiceFreeze(input = {}) {
       }
       if ((await inspectLoadedJob(options, service.label)).loaded) {
         throw new Error(`LaunchAgent ${service.label} was not frozen`);
+      }
+      if (service.snapshot !== null) {
+        await removeSnapshotPath(
+          options.fs,
+          service.path,
+          service.snapshot,
+          "MIGRATION_RECOVERY_CONFLICT",
+        );
       }
       const phase = service.label === options.label
         ? "after-controller-freeze"
@@ -2546,8 +2538,23 @@ export async function prepareStableServiceFreeze(input = {}) {
   } catch (primaryError) {
     if (primaryError?.simulatedHardCrash === true) throw primaryError;
     const rollbackErrors = [];
-    for (const service of [...frozen].reverse()) {
-      await bootstrap(options, service.label, service.path).catch((error) => rollbackErrors.push(error));
+    for (const service of [...services].reverse()) {
+      const current = await inspectLoadedJob(options, service.label)
+        .catch((error) => (rollbackErrors.push(error), { loaded: false, pid: null }));
+      if (current.loaded) {
+        await bootout(options, service.label, { knownLoaded: true })
+          .then(() => waitForFrozenPidExit(options, current.pid))
+          .catch((error) => rollbackErrors.push(error));
+      }
+      const accepted = service.backup.existed
+        ? [{ bytes: service.backup.bytes, mode: service.backup.mode }]
+        : [];
+      await restoreJournalBackup(options, service.backup, accepted)
+        .catch((error) => rollbackErrors.push(error));
+      if (service.backup.loaded) {
+        await bootstrap(options, service.label, service.path)
+          .catch((error) => rollbackErrors.push(error));
+      }
     }
     if (rollbackErrors.length === 0) {
       await removeMigrationJournal(options, transaction).catch((error) => rollbackErrors.push(error));
@@ -2584,7 +2591,7 @@ export async function rollbackStableServiceFreeze(transaction, input = {}) {
   const outerDecision = await readOuterTransactionDecision(context.options, {
     transactionId: descriptor.transactionId,
     journalPath: descriptor.coordinatorJournalPath,
-  });
+  }, descriptor);
   if (outerDecision === "commit") {
     throw new Error("stable service freeze cannot roll back after outer commit");
   }
@@ -2602,17 +2609,34 @@ export async function rollbackStableServiceFreeze(transaction, input = {}) {
     },
   ];
   for (const service of services) {
-    const snapshot = await snapshotFile(context.options.fs, service.path);
+    let snapshot = await snapshotFile(context.options.fs, service.path);
     const accepted = service.backup.existed
       ? [{ bytes: service.backup.bytes, mode: service.backup.mode }]
       : [];
+    if (
+      service.label === descriptor.controllerLabel &&
+      snapshot !== null &&
+      !accepted.some(({ bytes, mode }) => snapshotMatchesBytes(snapshot, bytes, mode))
+    ) {
+      const programArguments = await resolveProgramArguments(context.options);
+      const plist = await readPlistSnapshot(context.options, service.path, snapshot);
+      await assertMigrationControllerPlistAttribution(
+        context.options,
+        plist,
+        programArguments,
+      );
+      accepted.push({ bytes: snapshot.bytes, mode: snapshot.mode });
+    }
     assertRecoveryPathState(service.path, snapshot, accepted);
     const current = await inspectLoadedJob(context.options, service.label);
-    if (service.backup.loaded && !current.loaded) {
-      await bootstrap(context.options, service.label, service.path);
-    } else if (!service.backup.loaded && current.loaded) {
+    if (current.loaded) {
       await bootout(context.options, service.label, { knownLoaded: true });
       await waitForFrozenPidExit(context.options, current.pid);
+    }
+    await restoreJournalBackup(context.options, service.backup, accepted);
+    snapshot = await snapshotFile(context.options.fs, service.path);
+    if (service.backup.loaded) {
+      await bootstrap(context.options, service.label, service.path);
     }
     if ((await isLoaded(context.options, service.label)) !== service.backup.loaded) {
       throw new Error(`stable service ${service.label} prestate was not restored`);
@@ -2622,18 +2646,136 @@ export async function rollbackStableServiceFreeze(transaction, input = {}) {
   return { rolledBack: true };
 }
 
+export async function stopStableServiceFreezeForRollback(transaction, input = {}) {
+  const { descriptor, context, journalTransaction } = await reconstructFreeze(transaction, input);
+  const outerDecision = await readOuterTransactionDecision(context.options, {
+    transactionId: descriptor.transactionId,
+    journalPath: descriptor.coordinatorJournalPath,
+  }, descriptor);
+  if (outerDecision === "commit") {
+    throw new Error("stable service freeze cannot stop services after outer commit");
+  }
+  const labels = journalTransaction === null
+    ? [descriptor.controllerLabel]
+    : [descriptor.controllerLabel, descriptor.watchdogLabel];
+  for (const label of labels) {
+    const current = await inspectLoadedJob(context.options, label);
+    if (current.loaded) {
+      await bootout(context.options, label, { knownLoaded: true });
+      await waitForFrozenPidExit(context.options, current.pid);
+    }
+  }
+  if (journalTransaction === null) {
+    const snapshot = await snapshotFile(context.options.fs, descriptor.controllerPlistPath);
+    if (snapshot !== null) {
+      const programArguments = await resolveProgramArguments(context.options);
+      const plist = await readPlistSnapshot(
+        context.options,
+        descriptor.controllerPlistPath,
+        snapshot,
+      );
+      assertControllerPlistAttribution(context.options, plist, programArguments);
+      await removeSnapshotPath(
+        context.options.fs,
+        descriptor.controllerPlistPath,
+        snapshot,
+        "FILE_CAPABILITY_CONFLICT",
+      );
+    }
+  }
+  return { stopped: true, hadFrozenPrestate: journalTransaction !== null };
+}
+
 export async function finalizeStableServiceFreeze(transaction, input = {}) {
   const { descriptor, context, journalTransaction } = await reconstructFreeze(transaction, input);
   const outerDecision = await readOuterTransactionDecision(context.options, {
     transactionId: descriptor.transactionId,
     journalPath: descriptor.coordinatorJournalPath,
-  });
+  }, descriptor);
   if (outerDecision !== "commit") {
     throw new Error("stable service freeze cannot finalize before outer commit");
   }
-  if (journalTransaction !== null) {
-    await removeMigrationJournal(context.options, journalTransaction);
+  const persistent = input.removeFrozenServices !== true;
+  if (journalTransaction === null) {
+    if (persistent) {
+      const snapshot = await snapshotFile(context.options.fs, descriptor.controllerPlistPath, {
+        required: true,
+      });
+      const programArguments = await resolveProgramArguments(context.options);
+      const plist = await readPlistSnapshot(
+        context.options,
+        descriptor.controllerPlistPath,
+        snapshot,
+      );
+      assertControllerPlistAttribution(context.options, plist, programArguments);
+      const current = await inspectLoadedJob(context.options, descriptor.controllerLabel);
+      if (current.loaded) {
+        await bootout(context.options, descriptor.controllerLabel, { knownLoaded: true });
+        await waitForFrozenPidExit(context.options, current.pid);
+      }
+      await bootstrap(context.options, descriptor.controllerLabel, descriptor.controllerPlistPath);
+    }
+    return { committed: true };
   }
+  const { controllerBackup, watchdogBackup } = journalTransaction.journal;
+  const watchdogCurrent = await inspectLoadedJob(context.options, descriptor.watchdogLabel);
+  if (watchdogCurrent.loaded) {
+    await bootout(context.options, descriptor.watchdogLabel, { knownLoaded: true });
+    await waitForFrozenPidExit(context.options, watchdogCurrent.pid);
+  }
+  const watchdogSnapshot = await snapshotFile(context.options.fs, descriptor.watchdogPlistPath);
+  const watchdogAccepted = watchdogBackup.existed
+    ? [{ bytes: watchdogBackup.bytes, mode: watchdogBackup.mode }]
+    : [];
+  assertRecoveryPathState(descriptor.watchdogPlistPath, watchdogSnapshot, watchdogAccepted);
+  if (watchdogSnapshot !== null) {
+    await removeSnapshotPath(
+      context.options.fs,
+      descriptor.watchdogPlistPath,
+      watchdogSnapshot,
+      "MIGRATION_RECOVERY_CONFLICT",
+    );
+  }
+
+  const controllerCurrent = await inspectLoadedJob(context.options, descriptor.controllerLabel);
+  if (controllerCurrent.loaded) {
+    await bootout(context.options, descriptor.controllerLabel, { knownLoaded: true });
+    await waitForFrozenPidExit(context.options, controllerCurrent.pid);
+  }
+  const controllerSnapshot = await snapshotFile(context.options.fs, descriptor.controllerPlistPath);
+  if (persistent) {
+    if (controllerSnapshot === null) {
+      throw new Error("committed persistent controller plist is missing");
+    }
+    const programArguments = await resolveProgramArguments(context.options);
+    const plist = await readPlistSnapshot(
+      context.options,
+      descriptor.controllerPlistPath,
+      controllerSnapshot,
+    );
+    assertControllerPlistAttribution(context.options, plist, programArguments);
+    await bootstrap(context.options, descriptor.controllerLabel, descriptor.controllerPlistPath);
+  } else {
+    const accepted = controllerBackup.existed
+      ? [{ bytes: controllerBackup.bytes, mode: controllerBackup.mode }]
+      : [];
+    assertRecoveryPathState(descriptor.controllerPlistPath, controllerSnapshot, accepted);
+    if (controllerSnapshot !== null) {
+      await removeSnapshotPath(
+        context.options.fs,
+        descriptor.controllerPlistPath,
+        controllerSnapshot,
+        "MIGRATION_RECOVERY_CONFLICT",
+      );
+    }
+  }
+  if (await isLoaded(context.options, descriptor.watchdogLabel)) {
+    throw new Error("committed legacy watchdog remained loaded");
+  }
+  if ((await isLoaded(context.options, descriptor.controllerLabel)) !== persistent) {
+    throw new Error("committed controller loaded state does not match persistence");
+  }
+  await removeMigrationJournal(context.options, journalTransaction);
   return { committed: true };
 }
 
@@ -2911,6 +3053,27 @@ export async function migrateLegacyWatchdog(input = {}) {
   }
 }
 
+function migrationParticipantDescriptor({
+  outerTransaction,
+  participantJournalPath,
+  oldLabel,
+  newLabel,
+  oldPlistPath,
+  newPlistPath,
+}) {
+  return {
+    schemaVersion: 1,
+    operation: "migrate-legacy-watchdog",
+    transactionId: outerTransaction.transactionId,
+    coordinatorJournalPath: outerTransaction.journalPath,
+    participantJournalPath,
+    oldLabel,
+    newLabel,
+    oldPlistPath,
+    newPlistPath,
+  };
+}
+
 function validateMigrationDescriptor(value) {
   const keys = [
     "coordinatorJournalPath",
@@ -2996,7 +3159,8 @@ async function reconstructDeferredMigrationContext(transaction, input) {
 }
 
 export async function finalizeLegacyWatchdogMigration(transaction, input = {}) {
-  const context = await reconstructDeferredMigrationContext(transaction, input);
+  const descriptor = validateMigrationDescriptor(transaction);
+  const context = await reconstructDeferredMigrationContext(descriptor, input);
   const {
     options,
     journalTransaction,
@@ -3008,6 +3172,7 @@ export async function finalizeLegacyWatchdogMigration(transaction, input = {}) {
   const outerDecision = await readOuterTransactionDecision(
     options,
     journalTransaction.journal.outerTransaction,
+    descriptor,
   );
   if (
     journalTransaction.journal.phase !== "outer-commit-decided" &&
@@ -3043,7 +3208,8 @@ export async function finalizeLegacyWatchdogMigration(transaction, input = {}) {
 }
 
 export async function rollbackLegacyWatchdogMigration(transaction, input = {}) {
-  const context = await reconstructDeferredMigrationContext(transaction, input);
+  const descriptor = validateMigrationDescriptor(transaction);
+  const context = await reconstructDeferredMigrationContext(descriptor, input);
   const {
     options,
     journalTransaction,
@@ -3058,6 +3224,7 @@ export async function rollbackLegacyWatchdogMigration(transaction, input = {}) {
   const outerDecision = await readOuterTransactionDecision(
     options,
     journalTransaction.journal.outerTransaction,
+    descriptor,
   );
   if (outerDecision === "commit") {
     throw new Error("legacy migration cannot roll back after the durable outer commit decision");

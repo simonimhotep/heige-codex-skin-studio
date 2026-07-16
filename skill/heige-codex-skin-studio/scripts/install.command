@@ -93,9 +93,15 @@ else
   fi
 fi
 
-"$NODE" "$SOURCE/src/install-transaction.mjs" install \
-  --source "$SOURCE" \
-  --target "$TARGET"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  "$NODE" "$SOURCE/src/macos-install-coordinator.mjs" \
+    --source "$SOURCE" \
+    --target "$TARGET"
+else
+  "$NODE" "$SOURCE/src/install-transaction.mjs" install \
+    --source "$SOURCE" \
+    --target "$TARGET"
+fi
 
 echo "HeiGe Codex Skin Studio 已安装到：$TARGET"
 if [[ "${HEIGE_SKIP_APPLY:-0}" != "1" ]]; then

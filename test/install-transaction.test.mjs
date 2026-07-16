@@ -614,13 +614,14 @@ test("the executable participant protocol never makes its own commit decision", 
   await assert.rejects(lstat(`${targetRoot}.install-journal.json`), /ENOENT/);
 });
 
-test("all install wrappers delegate stable-tree mutation to the same Node transaction", async () => {
+test("install wrappers route Darwin through the outer coordinator and keep Linux tree-only", async () => {
   for (const relativePath of [
     "scripts/install.command",
     "skill/heige-codex-skin-studio/scripts/install.command",
   ]) {
     const source = await readFile(join(repoRoot, relativePath), "utf8");
-    assert.match(source, /src\/install-transaction\.mjs/);
+    assert.match(source, /uname -s[\s\S]*Darwin[\s\S]*src\/macos-install-coordinator\.mjs/);
+    assert.match(source, /else[\s\S]*src\/install-transaction\.mjs/);
     assert.match(source, /\binstall\b[\s\S]*--source[\s\S]*--target/);
     assert.match(source, /HEIGE_SKIP_APPLY/);
     assert.match(source, /codesign[\s\S]*--deep[\s\S]*--strict/);
