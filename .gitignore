@@ -2,4 +2,4 @@
 pet/
 output/*
 !output/codex-miku-theme.skill
-
+.worktrees/
