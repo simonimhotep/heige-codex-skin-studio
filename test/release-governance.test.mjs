@@ -7,6 +7,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
+import {
+  packageSkill,
+  TRACKED_PACKAGE_SOURCE_DATE_EPOCH,
+} from "../scripts/package-skill.mjs";
 import { updateReleaseHash } from "../scripts/update-release-hash.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -41,11 +45,38 @@ test("tracked source contains no backup assets or ignored reports", async () => 
   assert.equal(tracked.some((path) => path.startsWith("reports/")), false);
 });
 
+test("tracked skill artifact is the exact deterministic build of current source", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "heige-tracked-package-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const candidate = join(directory, "candidate.skill");
+  await packageSkill(candidate, { sourceDateEpoch: TRACKED_PACKAGE_SOURCE_DATE_EPOCH });
+  const expected = await readFile(candidate);
+  const tracked = await readFile(new URL("../output/heige-codex-skin-studio.skill", import.meta.url));
+  const expectedHash = createHash("sha256").update(expected).digest("hex");
+  const trackedHash = createHash("sha256").update(tracked).digest("hex");
+
+  assert.equal(
+    tracked.equals(expected),
+    true,
+    `tracked .skill is stale; expected ${expectedHash}, observed ${trackedHash}`,
+  );
+});
+
 test("every tracked visual asset has exactly one provenance row", async () => {
   await execFileAsync(process.execPath, ["scripts/check-asset-provenance.mjs", "--check"], {
     cwd: root,
     encoding: "utf8",
   });
+});
+
+test("public Release fails closed while packaged visual rights are unresolved", async () => {
+  await assert.rejects(
+    execFileAsync(process.execPath, ["scripts/check-asset-provenance.mjs", "--release"], {
+      cwd: root,
+      encoding: "utf8",
+    }),
+    /公开 Release 已阻断|public release.*blocked/i,
+  );
 });
 
 test("notice does not pretend a disclaimer grants redistribution rights", async () => {
@@ -120,6 +151,21 @@ test("CI has independent Node macOS Windows and package gates", async () => {
   assert.match(workflow, /pwsh.*run-tests\.ps1/s);
   assert.match(workflow, /SysWOW64.*resolver\.test\.ps1/s);
   assert.match(workflow, /scheduled-task\.test\.ps1.*-Integration/s);
+  assert.match(
+    workflow,
+    /windows:\s[\s\S]*?output\\heige-codex-skin-studio\.skill[\s\S]*?package-skill\.mjs[\s\S]*?scripts\\install\.ps1[\s\S]*?-SkipApply[\s\S]*?scripts\\windows\\restore\.ps1/,
+    "Windows must rebuild, install, and offline-restore the exact tracked candidate",
+  );
+  assert.match(
+    workflow,
+    /Unregister-ScheduledTask[\s\S]*?Get-ScheduledTask[\s\S]*?cleanup failed/,
+    "Scheduled Task cleanup must be verified rather than swallowed",
+  );
+  assert.match(
+    workflow,
+    /cmp "\$RUNNER_TEMP\/a\.skill" output\/heige-codex-skin-studio\.skill/,
+    "CI must bind the tracked user-facing artifact to the deterministic candidate",
+  );
   assert.match(
     workflow,
     /node:\s[\s\S]*?actions\/checkout@v6\s*\n\s*with:\s*\n\s*fetch-depth: 0/,

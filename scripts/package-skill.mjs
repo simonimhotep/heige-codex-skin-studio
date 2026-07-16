@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { constants as fsConstants, createWriteStream } from "node:fs";
+import { execFile as execFileCallback } from "node:child_process";
 import {
   chmod,
   lstat,
@@ -13,13 +14,17 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import yazl from "yazl";
+
+const execFile = promisify(execFileCallback);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifestPath = join(root, "scripts/skill-package-manifest.json");
 const trackedOutput = join(root, "output/heige-codex-skin-studio.skill");
 const archiveRoot = "heige-codex-skin-studio";
+export const TRACKED_PACKAGE_SOURCE_DATE_EPOCH = 1_704_067_200;
 const exactManifestKeys = ["entries", "schemaVersion"];
 const exactEntryKeys = ["destination", "exclude", "recursive", "source"];
 const runtimeScriptNames = ["apply", "doctor", "list", "status"];
@@ -121,23 +126,57 @@ async function readStableFile(path, label) {
   }
 }
 
-async function collectDirectory(sourceRoot, destinationRoot, exclude) {
+function repositoryRelative(path) {
+  const value = relative(root, path).split(sep).join("/");
+  if (value === "" || value === ".." || value.startsWith("../") || isAbsolute(value)) {
+    throw new TypeError("package source 超出仓库根目录");
+  }
+  return value;
+}
+
+async function trackedSourceIndex() {
+  const { stdout } = await execFile("git", ["ls-files", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const files = new Set(stdout.split("\0").filter(Boolean));
+  const directories = new Set();
+  for (const path of files) {
+    const segments = path.split("/");
+    for (let length = 1; length < segments.length; length += 1) {
+      directories.add(segments.slice(0, length).join("/"));
+    }
+  }
+  return { files, directories };
+}
+
+function assertTrackedSource(path, kind, tracked) {
+  const source = repositoryRelative(path);
+  const allowed = kind === "directory"
+    ? tracked.directories.has(source)
+    : tracked.files.has(source);
+  if (!allowed) throw new Error(`package source 不是 Git 已跟踪的${kind === "directory" ? "目录" : "文件"}：${source}`);
+}
+
+async function collectDirectory(sourceRoot, destinationRoot, exclude, tracked) {
   const result = [];
   const visit = async (directory, prefix = "") => {
     const directoryInfo = await lstat(directory);
     if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()) {
       throw new TypeError(`package source 目录无效：${relative(root, directory)}`);
     }
+    assertTrackedSource(directory, "directory", tracked);
     const names = (await readdir(directory)).sort();
     for (const name of names) {
       const childRelative = prefix ? `${prefix}/${name}` : name;
       if (exclude.has(childRelative)) continue;
-      if (name === ".DS_Store" || childRelative.includes(".before-")) continue;
       const path = join(directory, name);
       const info = await lstat(path);
       if (info.isSymbolicLink()) throw new TypeError(`package source 不得包含符号链接：${childRelative}`);
       if (info.isDirectory()) await visit(path, childRelative);
       else if (info.isFile()) {
+        assertTrackedSource(path, "file", tracked);
         result.push({ source: path, destination: archivePath(`${destinationRoot}/${childRelative}`) });
       } else throw new TypeError(`package source 只允许普通文件：${childRelative}`);
     }
@@ -153,16 +192,17 @@ async function collectDirectory(sourceRoot, destinationRoot, exclude) {
   return result;
 }
 
-async function collectFiles(manifest) {
+async function collectFiles(manifest, tracked) {
   const files = [];
   for (const entry of manifest) {
     const source = join(root, ...entry.source.split("/"));
     await assertNoSymlinkAncestors(source, entry.source);
     if (entry.recursive) {
-      files.push(...await collectDirectory(source, entry.destination, entry.exclude));
+      files.push(...await collectDirectory(source, entry.destination, entry.exclude, tracked));
     } else {
       if (entry.exclude.size !== 0) throw new TypeError(`单文件 entry 不得含 exclude：${entry.source}`);
       await regularFile(source, entry.source);
+      assertTrackedSource(source, "file", tracked);
       files.push({ source, destination: archivePath(entry.destination) });
     }
   }
@@ -263,7 +303,7 @@ export async function packageSkill(output, {
     if (error.code !== "ENOENT") throw error;
   }
   const manifest = parseManifest(JSON.parse((await readStableFile(manifestPath, "skill package manifest")).toString("utf8")));
-  const files = await collectFiles(manifest);
+  const files = await collectFiles(manifest, await trackedSourceIndex());
   await writeArchive(output, files, epoch);
   return output;
 }

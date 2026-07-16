@@ -9,11 +9,13 @@ const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const documentPath = resolve(root, "ASSET_PROVENANCE.md");
 const visualPath = /^(?:assets|themes|custom-pet|docs\/images)\/.*\.(?:png|jpe?g|webp)$/i;
+const APPROVED_RELEASE_STATUS = "已验证可公开再分发";
 
-if (process.argv.length !== 3 || process.argv[2] !== "--check") {
-  console.error("usage: node scripts/check-asset-provenance.mjs --check");
+if (process.argv.length !== 3 || !new Set(["--check", "--release"]).has(process.argv[2])) {
+  console.error("usage: node scripts/check-asset-provenance.mjs --check|--release");
   process.exitCode = 2;
 } else {
+  const releaseMode = process.argv[2] === "--release";
   const [{ stdout }, markdown] = await Promise.all([
     execFileAsync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }),
     readFile(documentPath, "utf8"),
@@ -42,5 +44,18 @@ if (process.argv.length !== 3 || process.argv[2] !== "--check") {
     ].filter(Boolean).join("\n");
     throw new Error(`素材来源表与 Git 跟踪文件不一致\n${detail}`);
   }
-  console.log(`asset provenance verified: ${tracked.length} tracked visual assets`);
+  if (releaseMode) {
+    const blocked = rows
+      .filter(({ fields }) => fields[3] !== APPROVED_RELEASE_STATUS)
+      .map(({ path }) => path);
+    if (blocked.length !== 0) {
+      throw new Error(
+        `公开 Release 已阻断：${blocked.length} 个素材未标记为「${APPROVED_RELEASE_STATUS}」\n` +
+        blocked.join("\n"),
+      );
+    }
+    console.log(`public release provenance verified: ${tracked.length} visual assets`);
+  } else {
+    console.log(`asset provenance inventory verified: ${tracked.length} tracked visual assets`);
+  }
 }

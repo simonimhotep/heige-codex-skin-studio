@@ -3,10 +3,15 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   access,
+  copyFile,
+  mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
+  symlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -100,6 +105,54 @@ test("two allowlisted builds are byte-identical and do not touch tracked output"
   assert.equal(await gitStatus(), beforeStatus);
 });
 
+test("packager rejects an untracked file inside a recursive release root", async (t) => {
+  const fixtureAlias = await mkdtemp(join(tmpdir(), "heige-package-untracked-"));
+  const fixture = await realpath(fixtureAlias);
+  t.after(() => rm(fixtureAlias, { recursive: true, force: true }));
+  await mkdir(join(fixture, "scripts"), { recursive: true });
+  await mkdir(join(fixture, "payload"), { recursive: true });
+  await mkdir(join(fixture, "output"), { recursive: true });
+  await symlink(join(repoRoot, "node_modules"), join(fixture, "node_modules"), "dir");
+  await copyFile(join(repoRoot, "scripts/package-skill.mjs"), join(fixture, "scripts/package-skill.mjs"));
+  await writeFile(join(fixture, "scripts/skill-package-manifest.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    entries: [{ source: "payload", destination: "payload", recursive: true, exclude: [] }],
+  })}\n`);
+  await writeFile(join(fixture, "package.json"), `${JSON.stringify({
+    name: "heige-package-fixture",
+    version: "1.0.0",
+    type: "module",
+    engines: { node: ">=22" },
+    bin: { "heige-codex-skin": "payload/tracked.txt" },
+    scripts: {},
+  })}\n`);
+  await writeFile(join(fixture, "payload/tracked.txt"), "tracked\n");
+  await execFileAsync("git", ["init", "--quiet"], { cwd: fixture });
+  await execFileAsync("git", ["add", "package.json", "scripts", "payload/tracked.txt"], { cwd: fixture });
+  await writeFile(join(fixture, "payload/local-secret.txt"), "must not ship\n");
+  const { stdout: tracked } = await execFileAsync("git", ["ls-files"], { cwd: fixture, encoding: "utf8" });
+  assert.match(tracked, /^payload\/tracked\.txt$/m);
+  assert.doesNotMatch(tracked, /local-secret/);
+
+  let failure = null;
+  try {
+    await execFileAsync(process.execPath, [
+      join(fixture, "scripts/package-skill.mjs"),
+      "--output", join(fixture, "candidate.skill"),
+      "--source-date-epoch", String(fixedEpoch),
+    ]);
+  } catch (error) {
+    failure = error;
+  }
+  if (failure === null) {
+    const { stdout } = await execFileAsync("/usr/bin/unzip", [
+      "-Z1", join(fixture, "candidate.skill"),
+    ], { encoding: "utf8" });
+    assert.fail(`packager accepted an untracked recursive source:\n${stdout}`);
+  }
+  assert.match(String(failure.stderr ?? failure.message), /Git.*tracked|Git.*跟踪|not.*tracked|package source/i);
+});
+
 test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
   const outputRoot = await mkdtemp(join(tmpdir(), "heige-package-allowlist-"));
   t.after(() => rm(outputRoot, { recursive: true, force: true }));
@@ -121,6 +174,12 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
     "heige-codex-skin-studio/payload/src/macos-launcher.mjs",
     "heige-codex-skin-studio/payload/scripts/enable-skin.command",
     "heige-codex-skin-studio/payload/scripts/resume.command",
+    "heige-codex-skin-studio/payload/scripts/windows/install.bat",
+    "heige-codex-skin-studio/payload/scripts/windows/install.ps1",
+    "heige-codex-skin-studio/payload/scripts/windows/controller.ps1",
+    "heige-codex-skin-studio/payload/scripts/windows/restore.ps1",
+    "heige-codex-skin-studio/payload/scripts/windows/lib/entrypoints.ps1",
+    "heige-codex-skin-studio/payload/scripts/windows/lib/scheduled-task.ps1",
     "heige-codex-skin-studio/payload/package.json",
   ]) assert.ok(names.includes(required), required);
   assert.equal(

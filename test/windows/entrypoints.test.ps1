@@ -928,7 +928,7 @@ try {
 
     Test-Case "BAT wrappers preserve the captured PowerShell failure code" {
         foreach ($name in @(
-            "apply.bat", "customize.bat", "enable-skin.bat", "pause.bat", "resume.bat", "restore.bat"
+            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat"
         )) {
             $source = [System.IO.File]::ReadAllText(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
@@ -948,7 +948,7 @@ try {
             Assert-Equal @(0xef, 0xbb, 0xbf) @($bytes[0], $bytes[1], $bytes[2])
         }
         foreach ($name in @(
-            "apply.bat", "customize.bat", "enable-skin.bat", "pause.bat", "resume.bat", "restore.bat"
+            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat"
         )) {
             $text = [System.IO.File]::ReadAllText(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))

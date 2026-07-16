@@ -4,6 +4,18 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const installerPath = fileURLToPath(new URL("../scripts/windows/install.ps1", import.meta.url));
+const installerBatPath = fileURLToPath(new URL("../scripts/windows/install.bat", import.meta.url));
+
+test("Windows source installer BAT preserves the captured PowerShell exit code", async () => {
+  const bytes = await readFile(installerBatPath);
+  const installer = bytes.toString("utf8");
+
+  const bareLf = bytes.findIndex((byte, index) => byte === 0x0a && bytes[index - 1] !== 0x0d);
+  assert.equal(bareLf, -1);
+  assert.match(installer, /set "HEIGE_EXIT=%ERRORLEVEL%"/);
+  assert.match(installer, /if not "%HEIGE_EXIT%"=="0" pause/);
+  assert.match(installer, /exit \/b %HEIGE_EXIT%/);
+});
 
 test("Windows payload installer binds the Skill wrapper parameters instead of ignoring them", async () => {
   const installer = await readFile(installerPath, "utf8");

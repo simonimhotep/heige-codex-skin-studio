@@ -88,6 +88,66 @@ jobs:
           & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
           -NoLogo -NoProfile -ExecutionPolicy Bypass
           -File test/windows/resolver.test.ps1
+      - name: Rebuild and install the exact tracked Windows candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tracked = Join-Path $env:GITHUB_WORKSPACE "output\heige-codex-skin-studio.skill"
+          $rebuilt = Join-Path $env:RUNNER_TEMP "windows-rebuilt.skill"
+          node scripts/package-skill.mjs --output $rebuilt --source-date-epoch 1704067200
+          if ($LASTEXITCODE -ne 0) { throw "Windows candidate rebuild failed." }
+          $trackedHash = (Get-FileHash -LiteralPath $tracked -Algorithm SHA256).Hash
+          $rebuiltHash = (Get-FileHash -LiteralPath $rebuilt -Algorithm SHA256).Hash
+          if ($trackedHash -cne $rebuiltHash) {
+            throw "Tracked candidate differs from the Windows rebuild: $trackedHash != $rebuiltHash"
+          }
+
+          $sandbox = Join-Path $env:RUNNER_TEMP "heige-packaged-windows"
+          $archive = Join-Path $sandbox "candidate.zip"
+          $unpacked = Join-Path $sandbox "unpacked"
+          $installRoot = Join-Path $sandbox "installed"
+          $startMenuRoot = Join-Path $sandbox "start-menu"
+          $profileRoot = Join-Path $sandbox "profile"
+          New-Item -ItemType Directory -Path $sandbox, $profileRoot -Force | Out-Null
+          Copy-Item -LiteralPath $tracked -Destination $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $unpacked -Force
+          $candidateRoot = Join-Path $unpacked "heige-codex-skin-studio"
+
+          $env:HOME = $profileRoot
+          $env:USERPROFILE = $profileRoot
+          $env:LOCALAPPDATA = Join-Path $profileRoot "AppData\Local"
+          $env:APPDATA = Join-Path $profileRoot "AppData\Roaming"
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA, $env:APPDATA -Force | Out-Null
+          & (Join-Path $candidateRoot "scripts\install.ps1") `
+            -InstallRoot $installRoot -StartMenuRoot $startMenuRoot -SkipApply
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows install failed." }
+
+          foreach ($required in @(
+            (Join-Path $installRoot "src\cli.mjs"),
+            (Join-Path $installRoot "scripts\windows\controller.ps1"),
+            (Join-Path $installRoot "scripts\windows\restore.ps1"),
+            (Join-Path $startMenuRoot "HeiGe Codex Skin Studio\HeiGe 皮肤启动器.lnk")
+          )) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Packaged Windows install is missing: $required"
+            }
+          }
+          & node (Join-Path $installRoot "src\cli.mjs") list | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Installed Windows CLI smoke test failed." }
+
+          $fakeApp = Join-Path $sandbox "fake-app\ChatGPT.exe"
+          New-Item -ItemType Directory -Path (Split-Path $fakeApp -Parent) -Force | Out-Null
+          [System.IO.File]::WriteAllBytes($fakeApp, [byte[]]@())
+          $env:HEIGE_CODEX_APP = $fakeApp
+          & (Join-Path $installRoot "scripts\windows\restore.ps1")
+          $statePath = Join-Path $env:APPDATA "HeiGeCodexSkinStudio\state.json"
+          $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($state.persistenceEnabled -isnot [bool] -or [bool]$state.persistenceEnabled) {
+            throw "Packaged offline restore did not persist the disabled choice."
+          }
+          if (Get-ScheduledTask -TaskName "HeiGe Codex Skin Studio Controller" -ErrorAction SilentlyContinue) {
+            throw "Packaged offline restore retained the production Scheduled Task."
+          }
       - name: Isolated current-user Scheduled Task integration
         shell: pwsh
         run: |
@@ -103,6 +163,9 @@ jobs:
             $name = (Get-Content -LiteralPath $path -Raw).Trim()
             if ($name -match '^HeiGe Codex Skin Studio Test [0-9a-f-]{36}$') {
               Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+              if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+                throw "Isolated Scheduled Task cleanup failed: $name"
+              }
             }
           }
       - name: Require a clean worktree
@@ -128,6 +191,7 @@ jobs:
           node scripts/package-skill.mjs --output "$RUNNER_TEMP/a.skill" --source-date-epoch 1704067200
           node scripts/package-skill.mjs --output "$RUNNER_TEMP/b.skill" --source-date-epoch 1704067200
           cmp "$RUNNER_TEMP/a.skill" "$RUNNER_TEMP/b.skill"
+          cmp "$RUNNER_TEMP/a.skill" output/heige-codex-skin-studio.skill
           sha256sum "$RUNNER_TEMP/a.skill" "$RUNNER_TEMP/b.skill"
       - name: Verify allowlist legal files and archive metadata
         run: node --test test/skill-package.test.mjs test/release-governance.test.mjs
