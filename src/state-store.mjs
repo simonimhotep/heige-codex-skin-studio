@@ -1,6 +1,8 @@
 import { randomBytes as cryptoRandomBytes, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -69,6 +71,33 @@ function isNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function requireLeaseForPaths(lease, paths) {
+  if (
+    lease === null ||
+    typeof lease !== "object" ||
+    typeof lease.lockPath !== "string" ||
+    typeof lease.assertOwned !== "function"
+  ) {
+    throw new Error("an operation lease with assertOwned() is required");
+  }
+  const parent = dirname(paths[0]);
+  if (
+    dirname(lease.lockPath) !== parent ||
+    paths.some((path) => dirname(path) !== parent)
+  ) {
+    throw new Error("operation lease and protected files must share the same state directory");
+  }
+  return lease;
+}
+
+async function assertLeaseOwned(lease) {
+  await lease.assertOwned();
+}
+
+function leaseWriteOptions(lease) {
+  return { beforeCommit: () => assertLeaseOwned(lease) };
+}
+
 function validateThemeId(value, { allowNative = false, field = "主题 ID" } = {}) {
   if (allowNative && value === NATIVE_THEME_ID) return value;
   if (typeof value !== "string" || !THEME_ID.test(value)) {
@@ -116,10 +145,117 @@ function validateProcessIdentity(value, { allowNull = false } = {}) {
   };
 }
 
+function statePathError(code, message, cause = undefined) {
+  const error = new Error(message, cause === undefined ? undefined : { cause });
+  error.code = code;
+  return error;
+}
+
+function enforcePosixFileSecurity(stats, kind) {
+  // Windows mode bits are not ACL evidence. Its platform adapter must protect and
+  // verify the state directory ACL before Node starts; this reader still checks
+  // link, file type, and opened-inode identity on every platform.
+  if (process.platform === "win32" || typeof process.getuid !== "function") return;
+  if (stats.uid !== process.getuid()) {
+    throw statePathError(
+      kind === "file" ? "STATE_FILE_OWNER_INVALID" : "STATE_PARENT_OWNER_INVALID",
+      `${kind === "file" ? "状态文件" : "状态目录"}不属于当前用户`,
+    );
+  }
+  const expectedMode = kind === "file" ? 0o600 : 0o700;
+  if ((stats.mode & 0o7777) !== expectedMode) {
+    throw statePathError(
+      kind === "file" ? "STATE_FILE_MODE_INVALID" : "STATE_PARENT_MODE_INVALID",
+      `${kind === "file" ? "状态文件" : "状态目录"}权限必须是 ${expectedMode.toString(8)}`,
+    );
+  }
+}
+
+async function inspectPrivateJsonPath(path) {
+  let fileStats;
+  try {
+    fileStats = await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (fileStats.isSymbolicLink()) {
+    throw statePathError("STATE_PATH_SYMLINK", "状态文件不得是符号链接");
+  }
+  if (!fileStats.isFile()) {
+    throw statePathError("STATE_FILE_TYPE_INVALID", "状态路径必须是普通文件");
+  }
+
+  const parentStats = await lstat(dirname(path));
+  if (parentStats.isSymbolicLink()) {
+    throw statePathError("STATE_PARENT_SYMLINK", "状态目录不得是符号链接");
+  }
+  if (!parentStats.isDirectory()) {
+    throw statePathError("STATE_PARENT_TYPE_INVALID", "状态文件父路径必须是目录");
+  }
+  enforcePosixFileSecurity(parentStats, "parent");
+  enforcePosixFileSecurity(fileStats, "file");
+  return fileStats;
+}
+
 async function ensurePrivateParent(path) {
   const parent = dirname(path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const missing = [];
+  let existing = parent;
+
+  while (true) {
+    try {
+      const stats = await lstat(existing);
+      if (stats.isSymbolicLink()) {
+        throw statePathError("STATE_PARENT_SYMLINK", "状态目录不得是符号链接");
+      }
+      if (!stats.isDirectory()) {
+        throw statePathError("STATE_PARENT_TYPE_INVALID", "状态文件父路径必须是目录");
+      }
+      if (
+        process.platform !== "win32" &&
+        typeof process.getuid === "function" &&
+        stats.uid !== process.getuid()
+      ) {
+        throw statePathError("STATE_PARENT_OWNER_INVALID", "状态目录不属于当前用户");
+      }
+      break;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      missing.push(existing);
+      const next = dirname(existing);
+      if (next === existing) throw error;
+      existing = next;
+    }
+  }
+
+  for (const directory of missing.reverse()) {
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    const stats = await lstat(directory);
+    if (stats.isSymbolicLink()) {
+      throw statePathError("STATE_PARENT_SYMLINK", "状态目录不得是符号链接");
+    }
+    if (!stats.isDirectory()) {
+      throw statePathError("STATE_PARENT_TYPE_INVALID", "状态文件父路径必须是目录");
+    }
+    if (
+      process.platform !== "win32" &&
+      typeof process.getuid === "function" &&
+      stats.uid !== process.getuid()
+    ) {
+      throw statePathError("STATE_PARENT_OWNER_INVALID", "状态目录不属于当前用户");
+    }
+    await chmod(directory, 0o700);
+    await syncDirectory(directory);
+    await syncDirectory(dirname(directory));
+  }
+
   await chmod(parent, 0o700);
+  await syncDirectory(parent);
   return parent;
 }
 
@@ -132,7 +268,13 @@ async function syncDirectory(path) {
   }
 }
 
-async function atomicWriteJson(path, value) {
+async function atomicWriteJson(path, value, { faultAt, beforeCommit } = {}) {
+  if (faultAt !== undefined && faultAt !== "after-temp-sync") {
+    throw new Error("unknown state write fault injection point");
+  }
+  if (beforeCommit !== undefined && typeof beforeCommit !== "function") {
+    throw new Error("beforeCommit 必须是函数");
+  }
   const parent = await ensurePrivateParent(path);
   const temporary = join(
     parent,
@@ -149,9 +291,18 @@ async function atomicWriteJson(path, value) {
     await handle.close();
     handle = null;
 
+    if (faultAt === "after-temp-sync") {
+      throw statePathError(
+        "FAULT_AFTER_TEMP_SYNC",
+        "injected crash after temporary state file sync",
+      );
+    }
+    // The lock cannot be reclaimed while its exact process identity is live.
+    // Keep this check immediately before rename so staging never widens that boundary.
+    if (beforeCommit !== undefined) await beforeCommit();
+
     await rename(temporary, path);
     renamed = true;
-    await chmod(path, 0o600);
     await syncDirectory(parent);
     return value;
   } catch (error) {
@@ -162,12 +313,34 @@ async function atomicWriteJson(path, value) {
 }
 
 async function readJson(path, { damagedMessage, validate }) {
+  const inspected = await inspectPrivateJsonPath(path);
+  if (inspected === null) return null;
+
+  let handle;
+  try {
+    const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    handle = await open(path, fsConstants.O_RDONLY | noFollow);
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ELOOP") {
+      throw statePathError("STATE_FILE_CHANGED", "状态文件在安全检查后发生变化", error);
+    }
+    throw error;
+  }
+
   let raw;
   try {
-    raw = await readFile(path, "utf8");
-  } catch (error) {
-    if (error.code === "ENOENT") return null;
-    throw error;
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== inspected.dev ||
+      opened.ino !== inspected.ino
+    ) {
+      throw statePathError("STATE_FILE_CHANGED", "状态文件在安全检查后发生变化");
+    }
+    enforcePosixFileSecurity(opened, "file");
+    raw = await handle.readFile("utf8");
+  } finally {
+    await handle.close();
   }
 
   let parsed;
@@ -230,9 +403,9 @@ export async function readStudioState(path) {
   });
 }
 
-export async function writeStudioState(path, value) {
+export async function writeStudioState(path, value, options = undefined) {
   const state = validateStudioState(value);
-  return atomicWriteJson(path, state);
+  return atomicWriteJson(path, state, options);
 }
 
 async function readRequiredStudioState(path) {
@@ -244,26 +417,37 @@ async function readRequiredStudioState(path) {
 export class StateConflictError extends Error {
   constructor(state) {
     super(`状态 revision 冲突，当前为 ${state.revision}`);
-    this.name = "StateConflictError";
+    Object.defineProperty(this, "name", {
+      configurable: true,
+      value: "StateConflictError",
+    });
     this.code = "REVISION_CONFLICT";
-    this.state = structuredClone(state);
+    this.revision = state.revision;
+    this.persistenceEnabled = state.persistenceEnabled;
   }
 }
 
-export async function compareAndUpdateStudioState(path, { expectedRevision, mutate }) {
+export async function compareAndUpdateStudioState(
+  path,
+  { lease, expectedRevision, mutate } = {},
+) {
+  requireLeaseForPaths(lease, [path]);
   if (!isNonNegativeInteger(expectedRevision)) {
     throw new Error("expectedRevision 必须是非负安全整数");
   }
   if (typeof mutate !== "function") throw new Error("mutate 必须是函数");
 
+  await assertLeaseOwned(lease);
   const current = await readRequiredStudioState(path);
+  await assertLeaseOwned(lease);
   if (current.revision !== expectedRevision) throw new StateConflictError(current);
   const mutated = mutate(structuredClone(current));
   const next = validateStudioState({
     ...mutated,
     revision: current.revision + 1,
   });
-  return writeStudioState(path, next);
+  await assertLeaseOwned(lease);
+  return writeStudioState(path, next, leaseWriteOptions(lease));
 }
 
 function generateControlToken(randomBytes) {
@@ -276,13 +460,17 @@ function generateControlToken(randomBytes) {
 
 export async function migrateLegacyState({
   statePath,
+  lease,
   legacyThemePath,
   legacyAgentLoaded,
   themeExists,
   defaultThemeId = DEFAULT_THEME_ID,
   randomBytes = cryptoRandomBytes,
 }) {
+  requireLeaseForPaths(lease, [statePath]);
+  await assertLeaseOwned(lease);
   const existing = await readStudioState(statePath);
+  await assertLeaseOwned(lease);
   if (existing !== null) {
     return { state: existing, migratedFrom: null };
   }
@@ -322,13 +510,14 @@ export async function migrateLegacyState({
     }
   }
 
+  await assertLeaseOwned(lease);
   const token = generateControlToken(randomBytes);
   const state = validateStudioState({
     ...createDefaultStudioState({ themeId, token }),
     persistenceEnabled,
     revision,
   });
-  await writeStudioState(statePath, state);
+  await writeStudioState(statePath, state, leaseWriteOptions(lease));
   return { state, migratedFrom };
 }
 
@@ -345,6 +534,24 @@ export function validateSessionState(value) {
     : validateThemeId(value.activeThemeId, { field: "activeThemeId" });
   if (typeof value.keepUntilProcessExit !== "boolean") {
     throw new Error("keepUntilProcessExit 必须是布尔值");
+  }
+  if (value.mode === "active" && (processIdentity === null || activeThemeId === null)) {
+    throw new Error("session mode invariant: active 必须绑定进程与活动主题");
+  }
+  if (value.mode === "paused" && (processIdentity === null || activeThemeId !== null)) {
+    throw new Error("session mode invariant: paused 必须绑定进程且不得包含活动主题");
+  }
+  if (value.mode === "native" && activeThemeId !== null) {
+    throw new Error("session mode invariant: native 不得包含活动主题");
+  }
+  if (
+    value.mode === "restoring" &&
+    (processIdentity === null || activeThemeId !== null || value.keepUntilProcessExit)
+  ) {
+    throw new Error("session mode invariant: restoring 必须绑定进程并停止活动主题与会话保留");
+  }
+  if (value.mode === "error" && (activeThemeId !== null || value.keepUntilProcessExit)) {
+    throw new Error("session mode invariant: error 不得保留活动主题或会话注入");
   }
   if (value.keepUntilProcessExit && processIdentity === null) {
     throw new Error("keepUntilProcessExit 需要精确进程身份");
@@ -365,9 +572,9 @@ export async function readSessionState(path) {
   });
 }
 
-export async function writeSessionState(path, value) {
+export async function writeSessionState(path, value, options = undefined) {
   const session = validateSessionState(value);
-  return atomicWriteJson(path, session);
+  return atomicWriteJson(path, session, options);
 }
 
 export function validateTransitionJournal(value) {
@@ -409,9 +616,9 @@ export async function readTransitionJournal(path) {
   });
 }
 
-export async function writeTransitionJournal(path, value) {
+export async function writeTransitionJournal(path, value, options = undefined) {
   const journal = validateTransitionJournal(value);
-  return atomicWriteJson(path, journal);
+  return atomicWriteJson(path, journal, options);
 }
 
 export async function clearTransitionJournal(path) {
@@ -425,12 +632,15 @@ export async function clearTransitionJournal(path) {
 }
 
 export class TransitionConflictError extends Error {
-  constructor(state, journal) {
+  constructor(state, _journal) {
     super("状态迁移冲突：revision、目标状态或 nonce 不匹配");
-    this.name = "TransitionConflictError";
+    Object.defineProperty(this, "name", {
+      configurable: true,
+      value: "TransitionConflictError",
+    });
     this.code = "TRANSITION_CONFLICT";
-    this.state = structuredClone(state);
-    this.journal = structuredClone(journal);
+    this.revision = state.revision;
+    this.persistenceEnabled = state.persistenceEnabled;
   }
 }
 
@@ -478,13 +688,20 @@ export async function recoverStateTransition({
   statePath,
   sessionPath,
   transitionPath,
+  lease,
   currentProcess,
 }) {
+  requireLeaseForPaths(lease, [statePath, sessionPath, transitionPath]);
+  await assertLeaseOwned(lease);
   let journal = await readTransitionJournal(transitionPath);
+  await assertLeaseOwned(lease);
   if (journal === null) {
+    const state = await readStudioState(statePath);
+    const session = await readSessionState(sessionPath);
+    await assertLeaseOwned(lease);
     return {
-      state: await readStudioState(statePath),
-      session: await readSessionState(sessionPath),
+      state,
+      session,
       recovered: false,
     };
   }
@@ -495,8 +712,10 @@ export async function recoverStateTransition({
   }
 
   let state = await readRequiredStudioState(statePath);
+  await assertLeaseOwned(lease);
   if (journal.stage === "prepared" && state.revision === journal.expectedRevision) {
     state = await compareAndUpdateStudioState(statePath, {
+      lease,
       expectedRevision: journal.expectedRevision,
       mutate: (current) => ({
         ...current,
@@ -504,15 +723,17 @@ export async function recoverStateTransition({
         lastTransitionNonce: journal.nonce,
       }),
     });
+    await assertLeaseOwned(lease);
     journal = await writeTransitionJournal(transitionPath, {
       ...journal,
       stage: "state-committed",
-    });
+    }, leaseWriteOptions(lease));
   } else if (journal.stage === "prepared" && isCommittedTransition(state, journal)) {
+    await assertLeaseOwned(lease);
     journal = await writeTransitionJournal(transitionPath, {
       ...journal,
       stage: "state-committed",
-    });
+    }, leaseWriteOptions(lease));
   } else if (journal.stage === "prepared") {
     throw new TransitionConflictError(state, journal);
   }
@@ -522,13 +743,16 @@ export async function recoverStateTransition({
   }
 
   const session = sessionForTransition(state, journal, currentProcess);
-  await writeSessionState(sessionPath, session);
+  await assertLeaseOwned(lease);
+  await writeSessionState(sessionPath, session, leaseWriteOptions(lease));
   if (journal.stage !== "session-committed") {
+    await assertLeaseOwned(lease);
     journal = await writeTransitionJournal(transitionPath, {
       ...journal,
       stage: "session-committed",
-    });
+    }, leaseWriteOptions(lease));
   }
+  await assertLeaseOwned(lease);
   await clearTransitionJournal(transitionPath);
   return { state, session, recovered: true };
 }

@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { DEFAULT_THEME_ID, NATIVE_THEME_ID } from "../src/constants.mjs";
+import { acquireOperationLock } from "../src/operation-lock.mjs";
 import {
   clearTransitionJournal,
   compareAndUpdateStudioState,
@@ -14,6 +26,7 @@ import {
   readStudioState,
   readTransitionJournal,
   recoverStateTransition,
+  validateSessionState,
   validateStudioState,
   writeSessionState,
   writeStudioState,
@@ -61,10 +74,33 @@ function disableJournal(overrides = {}) {
   };
 }
 
+function testLeaseFor(path, { failAtAssertion = Number.POSITIVE_INFINITY } = {}) {
+  let owned = true;
+  let assertions = 0;
+  return {
+    lockPath: join(dirname(path), "operation.lock"),
+    get assertions() {
+      return assertions;
+    },
+    lose() {
+      owned = false;
+    },
+    async assertOwned() {
+      assertions += 1;
+      if (!owned || assertions >= failAtAssertion) {
+        const error = new Error("operation lease is no longer owned");
+        error.code = "LOCK_NOT_OWNED";
+        throw error;
+      }
+    },
+  };
+}
+
 test("corrupt state fails closed without generating replacement state", async (t) => {
   const { statePath } = await fixture(t);
-  await mkdir(join(statePath, ".."), { recursive: true });
-  await writeFile(statePath, "{bad");
+  await mkdir(join(statePath, ".."), { recursive: true, mode: 0o700 });
+  await chmod(join(statePath, ".."), 0o700);
+  await writeFile(statePath, "{bad", { mode: 0o600 });
 
   await assert.rejects(() => readStudioState(statePath), /状态文件损坏/);
 
@@ -72,6 +108,7 @@ test("corrupt state fails closed without generating replacement state", async (t
   await assert.rejects(
     () => migrateLegacyState({
       statePath,
+      lease: testLeaseFor(statePath),
       legacyAgentLoaded: false,
       themeExists: async () => true,
       randomBytes: () => {
@@ -120,6 +157,7 @@ test("a loaded legacy watchdog and valid theme migrate enabled exactly once", as
 
   const result = await migrateLegacyState({
     statePath,
+    lease: testLeaseFor(statePath),
     legacyThemePath,
     legacyAgentLoaded: true,
     themeExists: async (id) => id === DEFAULT_THEME_ID,
@@ -144,6 +182,7 @@ test("a loaded legacy watchdog and valid theme migrate enabled exactly once", as
   await writeFile(legacyThemePath, "genshin-night\n");
   const second = await migrateLegacyState({
     statePath,
+    lease: testLeaseFor(statePath),
     legacyThemePath,
     legacyAgentLoaded: true,
     themeExists: async () => true,
@@ -160,6 +199,7 @@ test("new installs default off while invalid loaded legacy state fails closed", 
   const first = await fixture(t);
   const fresh = await migrateLegacyState({
     statePath: first.statePath,
+    lease: testLeaseFor(first.statePath),
     legacyAgentLoaded: false,
     themeExists: async (id) => id === DEFAULT_THEME_ID,
     randomBytes: () => Buffer.alloc(32, 5),
@@ -174,6 +214,7 @@ test("new installs default off while invalid loaded legacy state fails closed", 
   await assert.rejects(
     () => migrateLegacyState({
       statePath: second.statePath,
+      lease: testLeaseFor(second.statePath),
       legacyThemePath: second.legacyThemePath,
       legacyAgentLoaded: true,
       themeExists: async () => true,
@@ -187,21 +228,33 @@ test("new installs default off while invalid loaded legacy state fails closed", 
 test("compare and update returns current state on conflict and increments revision on success", async (t) => {
   const { statePath } = await fixture(t);
   await writeStudioState(statePath, stateAtRevision(3));
+  const lease = testLeaseFor(statePath);
 
   await assert.rejects(
     () => compareAndUpdateStudioState(statePath, {
+      lease,
       expectedRevision: 2,
       mutate: (state) => state,
     }),
     (error) => {
       assert.equal(error.code, "REVISION_CONFLICT");
-      assert.deepEqual(error.state, stateAtRevision(3));
+      assert.equal(error.revision, 3);
+      assert.equal(error.persistenceEnabled, true);
+      assert.deepEqual(Object.keys(error).sort(), [
+        "code",
+        "persistenceEnabled",
+        "revision",
+      ]);
+      const serialized = JSON.stringify(error);
+      assert.doesNotMatch(serialized, new RegExp(CONTROL_TOKEN));
+      assert.doesNotMatch(serialized, /controlToken|selectedThemeId|lastTransitionNonce/);
       return true;
     },
   );
 
   let mutationInput;
   const changed = await compareAndUpdateStudioState(statePath, {
+    lease,
     expectedRevision: 3,
     mutate: (state) => {
       mutationInput = state;
@@ -218,11 +271,118 @@ test("compare and update returns current state on conflict and increments revisi
 
   await assert.rejects(
     () => compareAndUpdateStudioState(statePath, {
+      lease,
       expectedRevision: 4,
       mutate: (state) => ({ ...state, lastNonNativeThemeId: NATIVE_THEME_ID }),
     }),
   );
   assert.deepEqual(await readStudioState(statePath), changed);
+});
+
+test("leased state changes fail closed when the lease is absent, unrelated, or lost before write", async (t) => {
+  const { root, statePath } = await fixture(t);
+  const original = stateAtRevision(3);
+  await writeStudioState(statePath, original);
+
+  await assert.rejects(
+    () => compareAndUpdateStudioState(statePath, {
+      expectedRevision: 3,
+      mutate: (state) => state,
+    }),
+    /operation lease/i,
+  );
+  await assert.rejects(
+    () => compareAndUpdateStudioState(statePath, {
+      lease: testLeaseFor(join(root, "unrelated", "state.json")),
+      expectedRevision: 3,
+      mutate: (state) => state,
+    }),
+    /same state directory/i,
+  );
+
+  const lostLease = testLeaseFor(statePath);
+  await assert.rejects(
+    () => compareAndUpdateStudioState(statePath, {
+      lease: lostLease,
+      expectedRevision: 3,
+      mutate: (state) => {
+        lostLease.lose();
+        return { ...state, persistenceEnabled: false };
+      },
+    }),
+    (error) => error.code === "LOCK_NOT_OWNED",
+  );
+  assert.ok(lostLease.assertions >= 2);
+  assert.deepEqual(await readStudioState(statePath), original);
+
+  const expiresDuringWrite = testLeaseFor(statePath, { failAtAssertion: 4 });
+  await assert.rejects(
+    () => compareAndUpdateStudioState(statePath, {
+      lease: expiresDuringWrite,
+      expectedRevision: 3,
+      mutate: (state) => ({ ...state, persistenceEnabled: false }),
+    }),
+    (error) => error.code === "LOCK_NOT_OWNED",
+  );
+  assert.equal(expiresDuringWrite.assertions, 4);
+  assert.deepEqual(await readStudioState(statePath), original);
+
+  const migration = await fixture(t);
+  const migrationLease = testLeaseFor(migration.statePath);
+  await assert.rejects(
+    () => migrateLegacyState({
+      statePath: migration.statePath,
+      lease: migrationLease,
+      legacyAgentLoaded: false,
+      themeExists: async () => {
+        migrationLease.lose();
+        return true;
+      },
+      randomBytes: () => Buffer.alloc(32, 5),
+    }),
+    (error) => error.code === "LOCK_NOT_OWNED",
+  );
+  assert.equal(await readStudioState(migration.statePath), null);
+});
+
+test("a real operation lease authorizes CAS only while its claim remains owned", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const { statePath } = await fixture(t);
+  await writeStudioState(statePath, stateAtRevision(3));
+  const stateRoot = await realpath(dirname(statePath));
+  const canonicalStatePath = join(stateRoot, "state.json");
+  const identity = {
+    pid: process.pid,
+    startedAt: "2026-07-17T08:00:00.000Z",
+  };
+  const lease = await acquireOperationLock({
+    lockPath: join(stateRoot, "operation.lock"),
+    stateRoot,
+    operation: "state-cas-integration",
+    identity,
+    readProcessIdentity: async (pid) => (pid === identity.pid ? identity : null),
+  });
+  t.after(() => lease.release());
+
+  const changed = await compareAndUpdateStudioState(canonicalStatePath, {
+    lease,
+    expectedRevision: 3,
+    mutate: (state) => ({ ...state, persistenceEnabled: false }),
+  });
+  assert.equal(changed.revision, 4);
+  assert.equal(changed.persistenceEnabled, false);
+
+  assert.equal(await lease.release(), true);
+  await assert.rejects(
+    () => compareAndUpdateStudioState(canonicalStatePath, {
+      lease,
+      expectedRevision: 4,
+      mutate: (state) => state,
+    }),
+    (error) => error.code === "LOCK_NOT_OWNED",
+  );
+  assert.deepEqual(await readStudioState(canonicalStatePath), changed);
 });
 
 test("state writes are private and atomic write failures clean sibling temporary files", async (t) => {
@@ -232,10 +392,13 @@ test("state writes are private and atomic write failures clean sibling temporary
   assert.equal((await stat(statePath)).mode & 0o777, 0o600);
   assert.deepEqual(await readStudioState(statePath), state);
 
-  if (process.platform !== "win32" && typeof process.getuid === "function" && process.getuid() !== 0) {
+  if (process.platform !== "win32" && typeof process.getuid === "function") {
     await chmod(statePath, 0o000);
     try {
-      await assert.rejects(() => readStudioState(statePath), (error) => error.code === "EACCES");
+      await assert.rejects(
+        () => readStudioState(statePath),
+        (error) => error.code === "STATE_FILE_MODE_INVALID",
+      );
     } finally {
       await chmod(statePath, 0o600);
     }
@@ -248,6 +411,87 @@ test("state writes are private and atomic write failures clean sibling temporary
   assert.deepEqual(siblings, ["state.json"]);
 });
 
+test("fault before rename preserves old state and cleans newly synced private directories", async (t) => {
+  const { root, statePath } = await fixture(t);
+  const original = stateAtRevision(0);
+  const changed = stateAtRevision(1, { persistenceEnabled: false });
+  await writeStudioState(statePath, original);
+
+  await assert.rejects(
+    () => writeStudioState(statePath, changed, { faultAt: "after-temp-sync" }),
+    (error) => error.code === "FAULT_AFTER_TEMP_SYNC",
+  );
+  assert.deepEqual(await readStudioState(statePath), original);
+  assert.deepEqual(await readdir(dirname(statePath)), ["state.json"]);
+
+  const freshPath = join(root, "fresh", "nested", "state.json");
+  await assert.rejects(
+    () => writeStudioState(freshPath, changed, { faultAt: "after-temp-sync" }),
+    (error) => error.code === "FAULT_AFTER_TEMP_SYNC",
+  );
+  assert.equal(await readStudioState(freshPath), null);
+  assert.deepEqual(await readdir(dirname(freshPath)), []);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(dirname(freshPath))).mode & 0o777, 0o700);
+    assert.equal((await stat(join(root, "fresh"))).mode & 0o777, 0o700);
+  }
+});
+
+test("POSIX readers reject links, non-files, wrong modes, and insecure parents", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const { root, statePath } = await fixture(t);
+  const state = stateAtRevision(0);
+  await writeStudioState(statePath, state);
+
+  const targetPath = join(root, "outside-state.json");
+  await writeFile(targetPath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  await rm(statePath);
+  await symlink(targetPath, statePath);
+  await assert.rejects(
+    () => readStudioState(statePath),
+    (error) => error.code === "STATE_PATH_SYMLINK",
+  );
+
+  const outsideDirectory = join(root, "outside-state");
+  const linkedDirectory = join(root, "linked-state");
+  await mkdir(outsideDirectory, { mode: 0o700 });
+  await writeFile(
+    join(outsideDirectory, "state.json"),
+    `${JSON.stringify(state)}\n`,
+    { mode: 0o600 },
+  );
+  await symlink(outsideDirectory, linkedDirectory);
+  await assert.rejects(
+    () => readStudioState(join(linkedDirectory, "state.json")),
+    (error) => error.code === "STATE_PARENT_SYMLINK",
+  );
+
+  await rm(statePath);
+  await writeFile(statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  await chmod(statePath, 0o644);
+  await assert.rejects(
+    () => readStudioState(statePath),
+    (error) => error.code === "STATE_FILE_MODE_INVALID",
+  );
+
+  await chmod(statePath, 0o600);
+  await chmod(dirname(statePath), 0o755);
+  await assert.rejects(
+    () => readStudioState(statePath),
+    (error) => error.code === "STATE_PARENT_MODE_INVALID",
+  );
+  await chmod(dirname(statePath), 0o700);
+  assert.deepEqual(await readStudioState(statePath), state);
+
+  await rm(statePath);
+  await mkdir(statePath, { mode: 0o700 });
+  await assert.rejects(
+    () => readStudioState(statePath),
+    (error) => error.code === "STATE_FILE_TYPE_INVALID",
+  );
+});
+
 test("journal and session readers reject unknown schemas and malformed shapes", async (t) => {
   const { sessionPath, transitionPath } = await fixture(t);
   await writeTransitionJournal(transitionPath, disableJournal());
@@ -258,12 +502,16 @@ test("journal and session readers reject unknown schemas and malformed shapes", 
   assert.equal(await readTransitionJournal(transitionPath), null);
 
   await mkdir(join(transitionPath, ".."), { recursive: true });
-  await writeFile(transitionPath, JSON.stringify({ ...disableJournal(), schemaVersion: 9 }));
+  await writeFile(
+    transitionPath,
+    JSON.stringify({ ...disableJournal(), schemaVersion: 9 }),
+    { mode: 0o600 },
+  );
   await assert.rejects(() => readTransitionJournal(transitionPath), /schema/i);
   await writeFile(transitionPath, "{");
   await assert.rejects(() => readTransitionJournal(transitionPath), /迁移日志损坏/);
 
-  await writeFile(sessionPath, JSON.stringify({ schemaVersion: 9 }));
+  await writeFile(sessionPath, JSON.stringify({ schemaVersion: 9 }), { mode: 0o600 });
   await assert.rejects(() => readSessionState(sessionPath), /schema/i);
   await writeFile(sessionPath, JSON.stringify({
     schemaVersion: 1,
@@ -275,6 +523,68 @@ test("journal and session readers reject unknown schemas and malformed shapes", 
   await assert.rejects(() => readSessionState(sessionPath));
 });
 
+test("session modes enforce their documented discriminated invariants", () => {
+  const active = {
+    schemaVersion: 1,
+    mode: "active",
+    process: CURRENT_PROCESS,
+    activeThemeId: DEFAULT_THEME_ID,
+    keepUntilProcessExit: false,
+  };
+
+  for (const malformed of [
+    { ...active, process: null },
+    { ...active, activeThemeId: null },
+    { ...active, mode: "paused", process: null, activeThemeId: null },
+    { ...active, mode: "paused" },
+    { ...active, mode: "native", activeThemeId: DEFAULT_THEME_ID },
+    { ...active, mode: "restoring", process: null, activeThemeId: null },
+    {
+      ...active,
+      mode: "restoring",
+      activeThemeId: null,
+      keepUntilProcessExit: true,
+    },
+    { ...active, mode: "error" },
+    { ...active, mode: "error", activeThemeId: null, keepUntilProcessExit: true },
+  ]) {
+    assert.throws(() => validateSessionState(malformed), /session mode invariant/i);
+  }
+
+  for (const valid of [
+    active,
+    { ...active, mode: "paused", activeThemeId: null },
+    {
+      ...active,
+      mode: "paused",
+      activeThemeId: null,
+      keepUntilProcessExit: true,
+    },
+    {
+      ...active,
+      mode: "native",
+      process: null,
+      activeThemeId: null,
+    },
+    {
+      ...active,
+      mode: "native",
+      activeThemeId: null,
+      keepUntilProcessExit: true,
+    },
+    { ...active, mode: "restoring", activeThemeId: null },
+    {
+      ...active,
+      mode: "error",
+      process: null,
+      activeThemeId: null,
+    },
+    { ...active, mode: "error", activeThemeId: null },
+  ]) {
+    assert.deepEqual(validateSessionState(valid), valid);
+  }
+});
+
 test("prepared recovery commits state, rebuilds exact live session, and clears journal", async (t) => {
   const { statePath, sessionPath, transitionPath } = await fixture(t);
   await writeStudioState(statePath, stateAtRevision(3));
@@ -284,6 +594,7 @@ test("prepared recovery commits state, rebuilds exact live session, and clears j
     statePath,
     sessionPath,
     transitionPath,
+    lease: testLeaseFor(statePath),
     currentProcess: CURRENT_PROCESS,
   });
 
@@ -306,6 +617,7 @@ test("prepared recovery resumes an already committed CAS without another revisio
   await writeStudioState(statePath, stateAtRevision(3));
   await writeTransitionJournal(transitionPath, disableJournal());
   await compareAndUpdateStudioState(statePath, {
+    lease: testLeaseFor(statePath),
     expectedRevision: 3,
     mutate: (state) => ({
       ...state,
@@ -318,6 +630,7 @@ test("prepared recovery resumes an already committed CAS without another revisio
     statePath,
     sessionPath,
     transitionPath,
+    lease: testLeaseFor(statePath),
     currentProcess: CURRENT_PROCESS,
   });
   assert.equal(recovered.state.revision, 4);
@@ -347,6 +660,7 @@ test("state-committed and session-committed recovery stages are idempotent", asy
       statePath: paths.statePath,
       sessionPath: paths.sessionPath,
       transitionPath: paths.transitionPath,
+      lease: testLeaseFor(paths.statePath),
       currentProcess: CURRENT_PROCESS,
     });
     assert.deepEqual(recovered.state, committed);
@@ -371,9 +685,23 @@ test("transition recovery fails closed on revision, desired value, or nonce mism
         statePath: paths.statePath,
         sessionPath: paths.sessionPath,
         transitionPath: paths.transitionPath,
+        lease: testLeaseFor(paths.statePath),
         currentProcess: CURRENT_PROCESS,
       }),
-      (error) => error.code === "TRANSITION_CONFLICT",
+      (error) => {
+        assert.equal(error.code, "TRANSITION_CONFLICT");
+        assert.equal(error.revision, state.revision);
+        assert.equal(error.persistenceEnabled, state.persistenceEnabled);
+        assert.deepEqual(Object.keys(error).sort(), [
+          "code",
+          "persistenceEnabled",
+          "revision",
+        ]);
+        const serialized = JSON.stringify(error);
+        assert.doesNotMatch(serialized, new RegExp(CONTROL_TOKEN));
+        assert.doesNotMatch(serialized, /executablePath|transition-1|journal|process/);
+        return true;
+      },
     );
     assert.notEqual(await readTransitionJournal(paths.transitionPath), null);
     assert.equal(await readSessionState(paths.sessionPath), null);
@@ -389,6 +717,7 @@ test("disable recovery completes without retaining injection after the exact pro
     statePath,
     sessionPath,
     transitionPath,
+    lease: testLeaseFor(statePath),
     currentProcess: null,
   });
   assert.equal(recovered.state.persistenceEnabled, false);
