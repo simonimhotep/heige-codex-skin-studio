@@ -29,17 +29,22 @@ async function waitForMainTargets(wait, port, { timeoutMs = 20_000, pollMs = 500
 }
 
 async function evaluateTargets(targets, expression, Session) {
-  const values = [];
+  const ok = [];
+  const failed = [];
   for (const target of targets) {
     const session = new Session(target.webSocketDebuggerUrl);
     try {
       await session.open();
-      values.push(await session.evaluate(expression));
+      ok.push({ id: target.id, value: await session.evaluate(expression) });
+    } catch (error) {
+      // 单个 target 失败（窗口在发现与连接之间关闭、悬浮层刚被关掉致 ws 被拒）
+      // 不该中断其余 target；收集起来，全部失败才向上抛
+      failed.push({ id: target.id, error: error?.message ?? String(error) });
     } finally {
       session.close();
     }
   }
-  return values;
+  return { ok, failed };
 }
 
 async function assetDataUrl(path, field) {
@@ -62,7 +67,7 @@ async function themeEntry(loadedTheme) {
   };
 }
 
-export async function applySkin({ loadedTheme, themes, port, deps = {} }) {
+export async function applySkin({ loadedTheme, themes, port, preferStored = false, deps = {} }) {
   const wait = deps.waitForRendererTargets ?? waitForRendererTargets;
   const Session = deps.Session ?? CdpSession;
   const menuThemes = themes?.length ? themes : [loadedTheme];
@@ -90,13 +95,23 @@ export async function applySkin({ loadedTheme, themes, port, deps = {} }) {
     styleId: STYLE_ID,
     menuId: MENU_ID,
     cssTemplate,
+    preferStored,
   });
   const targets = await waitForMainTargets(wait, port, {
     timeoutMs: deps.waitTimeoutMs ?? 20_000,
     pollMs: deps.pollMs ?? 500,
   });
-  const values = await evaluateTargets(targets, expression, Session);
-  return { applied: values.length, themeId, menuThemes: entries.map(({ id }) => id), targets: targets.map(({ id }) => id) };
+  const { ok, failed } = await evaluateTargets(targets, expression, Session);
+  if (ok.length === 0 && targets.length > 0) {
+    throw new Error(`全部 ${targets.length} 个窗口注入失败：${failed.map((f) => f.error).join("；")}`);
+  }
+  return {
+    applied: ok.length,
+    themeId,
+    menuThemes: entries.map(({ id }) => id),
+    targets: ok.map(({ id }) => id),
+    failed: failed.map(({ id }) => id),
+  };
 }
 
 export async function removeSkin({ port, deps = {} }) {
@@ -106,11 +121,16 @@ export async function removeSkin({ port, deps = {} }) {
     document.getElementById(${JSON.stringify(STYLE_ID)})?.remove();
     document.getElementById(${JSON.stringify(MENU_ID)})?.remove();
     delete document.documentElement.dataset.heigeCodexSkin;
+    // 删掉脚本化 API，卸载后残留的闭包不再可达，避免污染 status/dataset
+    try { delete window.__heigeCodexSkin; } catch (error) { window.__heigeCodexSkin = undefined; }
     return true;
   })()`;
   const targets = await fetchTargets(port);
-  const values = await evaluateTargets(targets, expression, Session);
-  return { removed: values.length };
+  const { ok, failed } = await evaluateTargets(targets, expression, Session);
+  if (ok.length === 0 && targets.length > 0) {
+    throw new Error(`全部 ${targets.length} 个窗口清理失败：${failed.map((f) => f.error).join("；")}`);
+  }
+  return { removed: ok.length, failed: failed.map(({ id }) => id) };
 }
 
 export async function skinStatus({ port, deps = {} }) {
@@ -122,5 +142,6 @@ export async function skinStatus({ port, deps = {} }) {
     themeId: document.documentElement.dataset.heigeCodexSkin ?? null
   }))()`;
   const targets = (await fetchTargets(port)).filter(isMainTarget);
-  return evaluateTargets(targets, expression, Session);
+  const { ok } = await evaluateTargets(targets, expression, Session);
+  return ok.map(({ value }) => value);
 }

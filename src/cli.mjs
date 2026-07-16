@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -10,14 +11,18 @@ import { createSingleImageTheme, listThemes } from "./theme-store.mjs";
 
 const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+const BOOLEAN_FLAGS = new Set(["prefer-stored"]);
+
 function options(argv) {
   const result = {};
   for (let index = 1; index < argv.length; index += 1) {
     const key = argv[index];
     if (!key.startsWith("--")) throw new Error(`无法识别的参数：${key}`);
+    const name = key.slice(2);
+    if (BOOLEAN_FLAGS.has(name)) { result[name] = true; continue; }
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) throw new Error(`${key} 缺少值`);
-    result[key.slice(2)] = value;
+    result[name] = value;
     index += 1;
   }
   return result;
@@ -79,7 +84,7 @@ export async function runCli(argv, overrides = {}) {
         // 坏主题不阻塞换肤，只是不进菜单
       }
     }
-    return deps.applySkin({ loadedTheme, themes: menuThemes, port: portFrom(args.port) });
+    return deps.applySkin({ loadedTheme, themes: menuThemes, port: portFrom(args.port), preferStored: Boolean(args["prefer-stored"]) });
   }
   if (command === "pause" || command === "restore") {
     return deps.removeSkin({ port: portFrom(args.port) });
@@ -101,7 +106,21 @@ export async function runCli(argv, overrides = {}) {
   throw new Error(`未知命令：${command}`);
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+// argv[1] 保留符号链接原路径，import.meta.url 是 realpath，npm bin 软链下必失配。
+// 先把 argv[1] 解成真实路径再比，否则通过 bin 软链调用会静默什么都不做、假成功退出 0。
+function isMainEntry() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  let real = entry;
+  try {
+    real = realpathSync(entry);
+  } catch {
+    // 解析失败就退回原路径比较
+  }
+  return pathToFileURL(real).href === import.meta.url;
+}
+
+if (isMainEntry()) {
   runCli(process.argv.slice(2))
     .then((result) => process.stdout.write(`${JSON.stringify(result, null, 2)}\n`))
     .catch((error) => {

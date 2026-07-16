@@ -10,6 +10,9 @@ export const DEFAULT_CDP_PORT = 9341;
 export const EXPECTED_BUNDLE_ID = "com.openai.codex";
 export const EXPECTED_TEAM_ID = "2DC432GLL2";
 
+// 只放行 CSS 认得的三/四/六/八位 hex，5/7 位在 CSS 里是无效色会静默失效
+export const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
 export function resolveStudioPaths({
   home = homedir(),
   platform = process.platform,

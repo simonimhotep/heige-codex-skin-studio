@@ -23,7 +23,8 @@ export function codexAppCandidates({
       win32.join(programFiles, "Codex", "Codex.exe"),
     ];
   }
-  return ["/Applications/ChatGPT.app"];
+  // 无管理员权限时 macOS 标准安装位是 ~/Applications，必须一并探测
+  return ["/Applications/ChatGPT.app", posix.join(home, "Applications", "ChatGPT.app")];
 }
 
 export function bundledNodeCandidates(appPath, { platform = process.platform } = {}) {

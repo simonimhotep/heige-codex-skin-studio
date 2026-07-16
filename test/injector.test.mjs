@@ -88,3 +88,33 @@ test("removes and checks the live style without persistent machinery", async () 
   assert.match(FakeSession.expressions[0], /remove\(\)/);
   assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
 });
+
+test("one dead target does not abort injection into the survivors", async () => {
+  const { loaded, deps } = await fixture();
+  class FlakySession {
+    constructor(url) { this.url = url; }
+    async open() { if (this.url.endsWith("/dead")) throw new Error("connection refused"); return this; }
+    async evaluate() { return true; }
+    close() {}
+  }
+  deps.waitForRendererTargets = async () => [
+    { id: "dead", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/dead" },
+    { id: "alive", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/alive" },
+  ];
+  deps.Session = FlakySession;
+  const result = await applySkin({ loadedTheme: loaded, port: 9341, deps });
+  assert.equal(result.applied, 1, "存活窗口仍被注入");
+  assert.deepEqual(result.targets, ["alive"]);
+  assert.deepEqual(result.failed, ["dead"]);
+});
+
+test("apply throws only when every target fails", async () => {
+  const { loaded, deps } = await fixture();
+  class DeadSession {
+    async open() { throw new Error("all dead"); }
+    async evaluate() { return true; }
+    close() {}
+  }
+  deps.Session = DeadSession;
+  await assert.rejects(applySkin({ loadedTheme: loaded, port: 9341, deps }), /注入失败/);
+});

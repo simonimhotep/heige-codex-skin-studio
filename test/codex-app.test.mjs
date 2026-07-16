@@ -121,3 +121,8 @@ test("runtime diagnostics reads windows process command lines via powershell", a
   assert.equal(diag.portOpen, false);
   assert.match(classifyInjection(diag), /^flag-present-port-closed/);
 });
+
+test("mac discovery includes the per-user Applications folder", () => {
+  const list = codexAppCandidates({ platform: "darwin", home: "/Users/alice" });
+  assert.ok(list.includes("/Users/alice/Applications/ChatGPT.app"), "must probe ~/Applications too");
+});

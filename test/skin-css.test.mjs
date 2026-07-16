@@ -27,3 +27,20 @@ test("rejects invalid colors instead of emitting arbitrary CSS", () => {
     /颜色/,
   );
 });
+
+test("rejects 5 and 7 digit hex colors that CSS cannot parse", () => {
+  const hero = "data:image/png;base64,iVBORw0KGgo=";
+  for (const bad of ["#12345", "#1234567"]) {
+    assert.throws(
+      () => buildSkinCss({ theme: { id: "t", colors: { accent: bad } }, heroDataUrl: hero }),
+      /无效主题颜色/,
+      `${bad} 应被拒绝`,
+    );
+  }
+  for (const good of ["#123", "#1234", "#123456", "#12345678"]) {
+    assert.doesNotThrow(
+      () => buildSkinCss({ theme: { id: "t", colors: { accent: good } }, heroDataUrl: hero }),
+      `${good} 应通过`,
+    );
+  }
+});

@@ -1,3 +1,5 @@
+import { HEX_COLOR } from "./constants.mjs";
+
 const DEFAULT_COLORS = {
   accent: "#24c9d7",
   secondary: "#ef8fd3",
@@ -7,7 +9,7 @@ const DEFAULT_COLORS = {
 
 function color(value, fallback) {
   const result = value ?? fallback;
-  if (!/^#[0-9a-f]{3,8}$/i.test(result)) throw new Error(`无效主题颜色：${result}`);
+  if (!HEX_COLOR.test(result)) throw new Error(`无效主题颜色：${result}`);
   return result;
 }
 
