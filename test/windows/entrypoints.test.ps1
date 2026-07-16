@@ -42,6 +42,20 @@ function New-TestEntrypointContext {
     }
 }
 
+function New-TestCodexProcess {
+    param(
+        [Parameter(Mandatory = $true)][int]$Id,
+        [int]$ParentProcessId = 0,
+        [string]$Path = "C:\Program Files\Codex\Codex.exe"
+    )
+    return [pscustomobject][ordered]@{
+        ProcessId = $Id
+        ParentProcessId = $ParentProcessId
+        ExecutablePath = $Path
+        Name = "Codex.exe"
+    }
+}
+
 function Assert-ExactCliCall {
     param(
         [Parameter(Mandatory = $true)][string[]]$Actual,
@@ -251,9 +265,16 @@ try {
 
     Test-Case "Restore disables unregisters then normally restarts native Codex" {
         $script:Events = @()
+        $script:CdpChecks = 0
         $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
-            -CdpStatusProvider { param($Context, $Port) $script:Events += "owner"; $true } `
+            -CdpStatusProvider {
+                param($Context, $Port)
+                $script:CdpChecks++
+                $script:Events += "owner:$($script:CdpChecks)"
+                $true
+            } `
+            -ProcessProvider { param($Context) throw "active CDP already proves the process" } `
             -CliProvider {
                 param($Context, $Arguments)
                 if ($Arguments[0] -eq "set-persistence") {
@@ -269,20 +290,35 @@ try {
                 [pscustomobject]@{ VerifiedAbsent = $true }
             } `
             -RestartNativeProvider { param($Context, $Port) $script:Events += "restart-native" }
-        Assert-Equal @("preflight", "owner", "disable", "pause", "unregister", "restart-native") $script:Events
+        Assert-Equal @(
+            "preflight", "owner:1", "disable", "owner:2", "pause", "unregister", "restart-native"
+        ) $script:Events
         Assert-False $result.PersistenceEnabled
         Assert-Equal "restoring" $result.Mode
     }
 
     Test-Case "Restore disables persistence while Codex is closed and keeps it closed" {
         $script:Events = @()
+        $script:CdpChecks = 0
+        $script:ProcessChecks = 0
         $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { $script:Events += "preflight"; New-TestEntrypointContext } `
-            -CdpStatusProvider { param($Context, $Port) $script:Events += "no-cdp"; $false } `
+            -CdpStatusProvider {
+                param($Context, $Port)
+                $script:CdpChecks++
+                $script:Events += "no-cdp:$($script:CdpChecks)"
+                $false
+            } `
+            -ProcessProvider {
+                param($Context)
+                $script:ProcessChecks++
+                $script:Events += "closed:$($script:ProcessChecks)"
+                @()
+            } `
             -CliProvider {
                 param($Context, $Arguments)
                 $script:Events += ($Arguments -join " ")
-                [pscustomobject]@{ mode = "closed"; persistenceEnabled = $false; revision = 10 }
+                [pscustomobject]@{ persistenceEnabled = $false; revision = 10 }
             } `
             -UnregisterProvider {
                 param($Context)
@@ -290,20 +326,39 @@ try {
                 [pscustomobject]@{ VerifiedAbsent = $true }
             } `
             -RestartNativeProvider { param($Context, $Port) throw "closed Codex must stay closed" }
-        Assert-Equal @("preflight", "no-cdp", "set-persistence false --port 9341", "unregister") $script:Events
+        Assert-Equal @(
+            "preflight", "no-cdp:1", "closed:1", "set-persistence false --port 9341",
+            "no-cdp:2", "unregister", "closed:2"
+        ) $script:Events
         Assert-Equal "closed" $result.Mode
         Assert-False $result.PersistenceEnabled
     }
 
     Test-Case "Restore disables persistence for native or CDP-unavailable Codex without starting it" {
         $script:Events = @()
+        $script:CdpChecks = 0
+        $script:ProcessChecks = 0
         $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
             -ContextProvider { New-TestEntrypointContext } `
-            -CdpStatusProvider { param($Context, $Port) $script:Events += "cdp-unavailable"; $false } `
+            -CdpStatusProvider {
+                param($Context, $Port)
+                $script:CdpChecks++
+                $script:Events += "cdp-unavailable:$($script:CdpChecks)"
+                $false
+            } `
+            -ProcessProvider {
+                param($Context)
+                $script:ProcessChecks++
+                $script:Events += "native-process:$($script:ProcessChecks)"
+                @(
+                    (New-TestCodexProcess -Id 41),
+                    (New-TestCodexProcess -Id 42 -ParentProcessId 41)
+                )
+            } `
             -CliProvider {
                 param($Context, $Arguments)
                 $script:Events += ($Arguments -join " ")
-                [pscustomobject]@{ mode = "native"; persistenceEnabled = $false; revision = 12 }
+                [pscustomobject]@{ persistenceEnabled = $false; revision = 12 }
             } `
             -UnregisterProvider {
                 param($Context)
@@ -311,9 +366,90 @@ try {
                 [pscustomobject]@{ VerifiedAbsent = $true }
             } `
             -RestartNativeProvider { param($Context, $Port) throw "native Codex must not restart" }
-        Assert-Equal @("cdp-unavailable", "set-persistence false --port 9341", "unregister") $script:Events
+        Assert-Equal @(
+            "cdp-unavailable:1", "native-process:1", "set-persistence false --port 9341",
+            "cdp-unavailable:2", "unregister", "native-process:2"
+        ) $script:Events
         Assert-Equal "native" $result.Mode
         Assert-False $result.PersistenceEnabled
+    }
+
+    Test-Case "Restore handles an exact CDP process exiting after persistence is disabled" {
+        $script:Events = @()
+        $script:CdpChecks = 0
+        $result = Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+            -ContextProvider { New-TestEntrypointContext } `
+            -CdpStatusProvider {
+                param($Context, $Port)
+                $script:CdpChecks++
+                $script:Events += "owner:$($script:CdpChecks)"
+                return ($script:CdpChecks -eq 1)
+            } `
+            -ProcessProvider {
+                param($Context)
+                $script:Events += "closed-after-exit"
+                @()
+            } `
+            -CliProvider {
+                param($Context, $Arguments)
+                $script:Events += ($Arguments -join " ")
+                [pscustomobject]@{ persistenceEnabled = $false; revision = 13 }
+            } `
+            -UnregisterProvider {
+                param($Context)
+                $script:Events += "unregister"
+                [pscustomobject]@{ VerifiedAbsent = $true }
+            } `
+            -RestartNativeProvider { param($Context, $Port) throw "exited Codex must not restart" }
+        Assert-Equal @(
+            "owner:1", "set-persistence false --port 9341", "owner:2", "unregister", "closed-after-exit"
+        ) $script:Events
+        Assert-Equal "closed" $result.Mode
+        Assert-False $result.PersistenceEnabled
+    }
+
+    Test-Case "Restore rejects multiple exact main processes before mutating state" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $script:Events += "no-cdp"; $false } `
+                -ProcessProvider {
+                    param($Context)
+                    $script:Events += "ambiguous-processes"
+                    @(
+                        (New-TestCodexProcess -Id 41),
+                        (New-TestCodexProcess -Id 51)
+                    )
+                } `
+                -CliProvider { param($Context, $Arguments) $script:Events += "cli" } `
+                -UnregisterProvider { param($Context) $script:Events += "unregister" } `
+                -RestartNativeProvider { param($Context, $Port) $script:Events += "restart" }
+        } "主进程归属不唯一"
+        Assert-Equal @("no-cdp", "ambiguous-processes") $script:Events
+    }
+
+    Test-Case "Restore rejects an unreadable candidate process before mutating state" {
+        $script:Events = @()
+        Assert-Throws {
+            Invoke-HeiGeRestoreFlow -Root $script:InstallRoot -Port 9341 `
+                -ContextProvider { New-TestEntrypointContext } `
+                -CdpStatusProvider { param($Context, $Port) $script:Events += "no-cdp"; $false } `
+                -ProcessProvider {
+                    param($Context)
+                    $script:Events += "unreadable-process"
+                    [pscustomobject]@{
+                        ProcessId = 41
+                        ParentProcessId = 0
+                        ExecutablePath = $null
+                        Name = "Codex.exe"
+                    }
+                } `
+                -CliProvider { param($Context, $Arguments) $script:Events += "cli" } `
+                -UnregisterProvider { param($Context) $script:Events += "unregister" } `
+                -RestartNativeProvider { param($Context, $Port) $script:Events += "restart" }
+        } "无法唯一归属"
+        Assert-Equal @("no-cdp", "unreadable-process") $script:Events
     }
 
     Test-Case "Restore preflight failure cannot quit restart or mutate state" {
@@ -635,6 +771,8 @@ try {
         Assert-False ($source -match '"enable-skin"|"restore"')
         Assert-Match '"set-persistence",\s*"true"' $source
         Assert-Match '"set-persistence",\s*"false"' $source
+        Assert-Match 'Get-CimInstance[^\r\n]*Win32_Process' $source
+        Assert-Match 'ParentProcessId' $source
     }
 
     Test-Case "Windows launcher preserves an omitted theme for authoritative selection" {

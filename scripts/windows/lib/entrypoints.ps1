@@ -154,6 +154,99 @@ function Unregister-HeiGeEntrypointTask {
     return $values[0]
 }
 
+function Get-HeiGeEntrypointProcessMode {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [scriptblock]$ProcessProvider
+    )
+    $records = if ($ProcessProvider) {
+        @(& $ProcessProvider $Context)
+    } else {
+        @(Get-CimInstance -ClassName Win32_Process `
+            -Filter "Name='ChatGPT.exe' OR Name='Codex.exe'" -ErrorAction Stop)
+    }
+    $owned = @()
+    foreach ($record in $records) {
+        if ($null -eq $record) {
+            throw "Codex 进程记录为空，无法唯一归属。"
+        }
+        $propertyNames = @($record.PSObject.Properties.Name)
+        $processIdName = if ($propertyNames -contains "ProcessId") {
+            "ProcessId"
+        } elseif ($propertyNames -contains "Id") {
+            "Id"
+        } else {
+            $null
+        }
+        $pathName = if ($propertyNames -contains "ExecutablePath") {
+            "ExecutablePath"
+        } elseif ($propertyNames -contains "Path") {
+            "Path"
+        } else {
+            $null
+        }
+        if (-not $processIdName -or -not $pathName -or
+            $propertyNames -notcontains "ParentProcessId") {
+            throw "Codex 进程记录缺少 PID、父 PID 或可执行路径，无法唯一归属。"
+        }
+        try {
+            $path = [string]$record.$pathName
+            $processId = 0
+            $parentProcessId = 0
+            $validProcessId = [int]::TryParse([string]$record.$processIdName, [ref]$processId)
+            $validParentId = [int]::TryParse([string]$record.ParentProcessId, [ref]$parentProcessId)
+        } catch {
+            throw "Codex 进程记录无法安全读取，无法唯一归属。"
+        }
+        if (-not $path -or -not $validProcessId -or $processId -le 0 -or
+            -not $validParentId -or $parentProcessId -lt 0) {
+            throw "Codex 进程记录无效，无法唯一归属。"
+        }
+        $owner = [pscustomobject]@{
+            Id = $processId
+            Path = $path
+            ProcessName = if ($propertyNames -contains "Name") {
+                [string]$record.Name
+            } elseif ($propertyNames -contains "ProcessName") {
+                [string]$record.ProcessName
+            } else {
+                ""
+            }
+        }
+        if (Test-CdpOwnerMatchesApp -Owner $owner -App $Context.App) {
+            $owned += [pscustomobject][ordered]@{
+                Id = $processId
+                ParentProcessId = $parentProcessId
+                Path = Get-HeiGeFullPath -Path $path
+            }
+        }
+    }
+    if ($owned.Count -eq 0) { return "closed" }
+
+    $normalized = @()
+    foreach ($group in @($owned | Group-Object Id)) {
+        $parents = @($group.Group | ForEach-Object { [int]$_.ParentProcessId } | Sort-Object -Unique)
+        $paths = @($group.Group | ForEach-Object { [string]$_.Path } | Sort-Object -Unique)
+        if ($parents.Count -ne 1 -or $paths.Count -ne 1) {
+            throw "同一 Codex PID 存在冲突记录，无法唯一归属。"
+        }
+        $normalized += [pscustomobject][ordered]@{
+            Id = [int]$group.Name
+            ParentProcessId = [int]$parents[0]
+            Path = [string]$paths[0]
+        }
+    }
+    $ownedIds = @{}
+    foreach ($process in $normalized) { $ownedIds[[int]$process.Id] = $true }
+    $mainProcesses = @($normalized | Where-Object {
+        -not $ownedIds.ContainsKey([int]$_.ParentProcessId)
+    })
+    if ($mainProcesses.Count -ne 1) {
+        throw "Codex 主进程归属不唯一，拒绝判断 closed/native。"
+    }
+    return "native"
+}
+
 function Invoke-HeiGeApplyWithContext {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -322,6 +415,7 @@ function Invoke-HeiGeRestoreFlow {
         [ValidateRange(1024, 65535)][int]$Port = 9341,
         [scriptblock]$ContextProvider,
         [scriptblock]$CdpStatusProvider,
+        [scriptblock]$ProcessProvider,
         [scriptblock]$CliProvider,
         [scriptblock]$UnregisterProvider,
         [scriptblock]$RestartNativeProvider
@@ -332,21 +426,17 @@ function Invoke-HeiGeRestoreFlow {
     } else {
         Test-Cdp -Port $Port -App $context.App
     }
+    if (-not $hasExactCdp) {
+        Get-HeiGeEntrypointProcessMode -Context $context `
+            -ProcessProvider $ProcessProvider | Out-Null
+    }
     $disabled = Invoke-HeiGeContextCli -Context $context `
         -Arguments @("set-persistence", "false", "--port", [string]$Port) -CliProvider $CliProvider
     Assert-HeiGePersistenceResult -Result $disabled -Expected $false
-    $offlineMode = $null
-    if ($disabled.PSObject.Properties.Name -contains "mode") {
-        $candidateMode = [string]$disabled.mode
-        if ($candidateMode -cne "closed" -and $candidateMode -cne "native") {
-            throw "离线关闭常驻返回了未知模式：$candidateMode"
-        }
-        $offlineMode = $candidateMode
-        $hasExactCdp = $false
-    } elseif (-not $hasExactCdp) {
-        # CDP may have appeared after the read-only probe. A result without an offline mode
-        # proves the CLI used the exact live-controller path, so clean and restart that process.
-        $hasExactCdp = $true
+    $hasExactCdp = if ($CdpStatusProvider) {
+        [bool](& $CdpStatusProvider $context $Port)
+    } else {
+        Test-Cdp -Port $Port -App $context.App
     }
     if ($hasExactCdp) {
         $paused = Invoke-HeiGeContextCli -Context $context `
@@ -354,6 +444,11 @@ function Invoke-HeiGeRestoreFlow {
         Assert-HeiGeModeResult -Result $paused -Expected "paused"
     }
     Unregister-HeiGeEntrypointTask -Context $context -UnregisterProvider $UnregisterProvider | Out-Null
+    $offlineMode = if ($hasExactCdp) {
+        $null
+    } else {
+        Get-HeiGeEntrypointProcessMode -Context $context -ProcessProvider $ProcessProvider
+    }
     if ($hasExactCdp) {
         if ($RestartNativeProvider) {
             & $RestartNativeProvider $context $Port | Out-Null
