@@ -22,7 +22,17 @@ class FakeSession {
   async open() { return this; }
   async evaluate(expression) {
     FakeSession.expressions.push(expression);
-    if (expression.includes("installed:")) return { installed: true, themeId: "demo" };
+    if (expression.includes("installed:")) {
+      return {
+        installed: true,
+        generation: "a".repeat(32),
+        mode: "active",
+        themeId: "demo",
+        menu: true,
+        persistenceEnabled: true,
+        revision: 7,
+      };
+    }
     return true;
   }
   close() { this.closed = true; }
@@ -115,7 +125,15 @@ test("removes and checks the live style without persistent machinery", async () 
   const { deps } = await fixture();
   assert.equal((await removeSkin({ port: 9341, deps })).removed, 2, "pause 要连宠物悬浮层一起清理");
   const status = await skinStatus({ port: 9341, deps });
-  assert.deepEqual(status.statuses, [{ installed: true, themeId: "demo" }]);
+  assert.deepEqual(status.statuses, [{
+    installed: true,
+    generation: "a".repeat(32),
+    mode: "active",
+    themeId: "demo",
+    menu: true,
+    persistenceEnabled: true,
+    revision: 7,
+  }]);
   assert.equal(status.results.succeeded[0].kind, "main");
   assert.match(FakeSession.expressions[0], /remove\(\)/);
   assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
@@ -251,4 +269,52 @@ test("rejects an oversized in-memory snapshot before encoding or CDP evaluation"
   };
   await assert.rejects(applySkin({ loadedTheme: loaded, port: 9341, deps }), /8 MiB|8388608/);
   assert.equal(FakeSession.expressions.length, 0);
+});
+
+test("apply target allowlist evaluates only selected exact main renderers", async () => {
+  const { loaded, deps } = await fixture();
+  const evaluated = [];
+  deps.waitForRendererTargets = async () => [
+    { id: "healthy", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/healthy" },
+    { id: "drifted", type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:9341/devtools/page/drifted" },
+  ];
+  deps.Session = class RecordingSession {
+    constructor(url) { this.id = url.split("/").at(-1); }
+    async open() { return this; }
+    async evaluate() { evaluated.push(this.id); return true; }
+    close() {}
+  };
+  const result = await applySkin({
+    loadedTheme: loaded,
+    port: 9341,
+    targetIds: ["drifted"],
+    deps,
+  });
+  assert.deepEqual(evaluated, ["drifted"]);
+  assert.deepEqual(result.targets, ["drifted"]);
+  assert.deepEqual(result.results.skipped.map(({ id }) => id), ["healthy"]);
+});
+
+test("apply target allowlist fails closed when no selected main exists", async () => {
+  const { loaded, deps } = await fixture();
+  let sessions = 0;
+  deps.Session = class NeverSession { constructor() { sessions += 1; } };
+  await assert.rejects(
+    applySkin({ loadedTheme: loaded, port: 9341, targetIds: ["missing"], deps }),
+    (error) => error.code === "NO_SELECTED_MAIN_RENDERER",
+  );
+  assert.equal(sessions, 0);
+});
+
+test("apply target allowlist rejects malformed and duplicate IDs before resource or CDP work", async () => {
+  const { loaded, deps } = await fixture();
+  let waits = 0;
+  deps.waitForRendererTargets = async () => { waits += 1; return []; };
+  for (const targetIds of ["one", [""], ["one", "one"], [1]]) {
+    await assert.rejects(
+      applySkin({ loadedTheme: loaded, port: 9341, targetIds, deps }),
+      /targetIds|renderer ID/,
+    );
+  }
+  assert.equal(waits, 0);
 });

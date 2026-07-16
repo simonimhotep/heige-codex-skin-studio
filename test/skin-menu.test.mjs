@@ -117,8 +117,8 @@ test("clamps degenerate upload dimensions and reports failures", () => {
     activeId: "a",
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
   });
-  assert.match(script, /Math\.max\(1, Math\.round\(img\.width/, "width must have a floor");
-  assert.match(script, /Math\.max\(1, Math\.round\(img\.height/, "height must have a floor");
+  assert.match(script, /width: Math\.max\(1, Math\.ceil\(width \/ factor\)\)/, "width must have a floor");
+  assert.match(script, /height: Math\.max\(1, Math\.ceil\(height \/ factor\)\)/, "height must have a floor");
   assert.match(script, /reader\.onerror/, "file read errors must be handled");
 });
 

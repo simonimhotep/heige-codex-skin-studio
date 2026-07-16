@@ -102,6 +102,21 @@ function targetError(code, message, results) {
   return error;
 }
 
+function normalizeTargetIds(targetIds) {
+  if (targetIds === undefined || targetIds === null) return null;
+  if (!Array.isArray(targetIds)) throw new TypeError("targetIds 必须是 renderer ID 数组");
+  const normalized = [];
+  const seen = new Set();
+  for (const value of targetIds) {
+    if (typeof value !== "string" || value.length < 1 || value.length > 512 || seen.has(value)) {
+      throw new TypeError("targetIds 必须包含互不重复的非空 renderer ID");
+    }
+    seen.add(value);
+    normalized.push(value);
+  }
+  return new Set(normalized);
+}
+
 async function readThemeAsset(path, field, snapshot = null) {
   if (!path) return null;
   const mime = MIME[extname(path).toLowerCase()];
@@ -152,7 +167,16 @@ function themeEntry(resources) {
   };
 }
 
-export async function applySkin({ loadedTheme, themes, port, preferStored = false, control = null, deps = {} }) {
+export async function applySkin({
+  loadedTheme,
+  themes,
+  port,
+  preferStored = false,
+  control = null,
+  targetIds = null,
+  deps = {},
+}) {
+  const targetAllowlist = normalizeTargetIds(targetIds);
   const wait = deps.waitForRendererTargets ?? waitForRendererTargets;
   const Session = deps.Session ?? CdpSession;
   const menuThemes = themes?.length ? themes : [loadedTheme];
@@ -193,9 +217,27 @@ export async function applySkin({ loadedTheme, themes, port, preferStored = fals
     timeoutMs: deps.waitTimeoutMs ?? 20_000,
     pollMs: deps.pollMs ?? 500,
   });
-  const targets = classified.filter(({ kind }) => kind === "main");
+  const allMainTargets = classified.filter(({ kind }) => kind === "main");
+  const targets = targetAllowlist === null
+    ? allMainTargets
+    : allMainTargets.filter((target) => targetAllowlist.has(safeId(target)));
+  const unselected = targetAllowlist === null
+    ? []
+    : allMainTargets
+      .filter((target) => !targetAllowlist.has(safeId(target)))
+      .map((target) => safeTarget(target, { reason: "未被本次目标 allowlist 选中" }));
+  if (targetAllowlist !== null && targets.length === 0) {
+    const results = resultsFor(classified, { succeeded: [], failed: [] });
+    results.skipped.push(...unselected);
+    throw targetError(
+      "NO_SELECTED_MAIN_RENDERER",
+      "未发现 targetIds 选中的 Codex 主窗口 renderer",
+      results,
+    );
+  }
   const evaluated = await evaluateTargets(targets, expression, Session);
   const results = resultsFor(classified, evaluated);
+  results.skipped.push(...unselected);
   if (evaluated.succeeded.length === 0) {
     throw targetError(
       "ALL_MAIN_TARGETS_FAILED",
@@ -262,11 +304,33 @@ export async function removeSkin({ port, deps = {} }) {
 export async function skinStatus({ port, deps = {} }) {
   const fetchTargets = deps.fetchRendererTargets ?? fetchRendererTargets;
   const Session = deps.Session ?? CdpSession;
-  const expression = `(() => ({
-    installed: Boolean(document.getElementById(${JSON.stringify(STYLE_ID)})),
-    menu: Boolean(document.getElementById(${JSON.stringify(MENU_ID)})),
-    themeId: document.documentElement.dataset.heigeCodexSkin ?? null
-  }))()`;
+  const expression = `(() => {
+    const installed = Boolean(document.getElementById(${JSON.stringify(STYLE_ID)}));
+    const menu = Boolean(document.getElementById(${JSON.stringify(MENU_ID)}));
+    let status = null;
+    try { status = window.__heigeCodexSkinRuntime?.status?.() ?? null; } catch {}
+    let generation = null;
+    let mode = null;
+    let themeId = document.documentElement.dataset.heigeCodexSkin ?? null;
+    let persistenceEnabled = false;
+    let revision = 0;
+    try {
+      if (typeof status?.generation === "string") generation = status.generation;
+      if (status?.mode === "active" || status?.mode === "native") mode = status.mode;
+      if (typeof status?.themeId === "string" || status?.themeId === null) themeId = status.themeId;
+      persistenceEnabled = status?.persistenceEnabled === true;
+      if (Number.isSafeInteger(status?.revision) && status.revision >= 0) revision = status.revision;
+    } catch {}
+    return {
+      installed: installed,
+      generation,
+      mode: mode ?? (themeId === null ? "native" : "active"),
+      themeId,
+      menu,
+      persistenceEnabled,
+      revision
+    };
+  })()`;
   const classified = classifyCodexTargets(await fetchTargets(port));
   const targets = classified.filter(({ kind }) => kind === "main");
   if (targets.length === 0) {

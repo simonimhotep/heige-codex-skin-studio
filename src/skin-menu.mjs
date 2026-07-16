@@ -121,6 +121,10 @@ export function buildSkinMenuScript({
     : null;
   const channel = {
     closed: false,
+    postMessage(value) {
+      if (this.closed) throw new DOMException("HeiGe menu generation disposed", "InvalidStateError");
+      rawChannel?.postMessage(value);
+    },
     close() {
       if (this.closed) return;
       this.closed = true;
@@ -198,6 +202,22 @@ export function buildSkinMenuScript({
   const assertCurrent = () => {
     if (!isCurrent()) throw new DOMException("HeiGe menu generation disposed", "AbortError");
   };
+  let outboundSequence = 0;
+  const publish = (kind, value) => {
+    assertCurrent();
+    if (rawChannel === null) return false;
+    outboundSequence += 1;
+    try {
+      channel.postMessage({
+        schemaVersion: 1,
+        senderGeneration: generation,
+        sequence: outboundSequence,
+        kind,
+        value,
+      });
+      return true;
+    } catch { return false; }
+  };
 
   let style = document.getElementById(data.styleId);
   if (!style) {
@@ -255,7 +275,7 @@ export function buildSkinMenuScript({
   // 卸载皮肤后 style 已脱离 DOM，任何脚本化调用不得再改 dataset/写存储，否则污染 status
   const alive = () => { assertCurrent(); return style.isConnected; };
 
-  const setTheme = (id, persist = true) => {
+  const setTheme = (id, persist = true, broadcast = true) => {
     if (!alive()) return;
     const theme = data.themes.find((candidate) => candidate.id === id);
     if (!theme) return;
@@ -263,13 +283,15 @@ export function buildSkinMenuScript({
     document.documentElement.dataset.heigeCodexSkin = theme.id;
     paint(theme.id);
     if (persist) writeSelected(theme.id);
+    if (broadcast) publish("theme", theme.id);
   };
-  const clearTheme = (persist = true) => {
+  const clearTheme = (persist = true, broadcast = true) => {
     if (!alive()) return;
     style.textContent = "";
     delete document.documentElement.dataset.heigeCodexSkin;
     paint(null);
     if (persist) writeSelected(data.nativeSel);
+    if (broadcast) publish("theme", data.nativeSel);
   };
 
   for (const theme of data.themes) {
@@ -491,14 +513,15 @@ export function buildSkinMenuScript({
   };
 
   let currentCustom = null;   // 内存态：save 失败时仍以它为准，不被 localStorage 里的旧图覆盖
-  const applyCustomTheme = (theme) => {
+  const applyCustomTheme = (theme, persist = true, broadcast = true) => {
     if (!alive()) return;
     currentCustom = theme;
     style.textContent = buildCustomCss(theme.dataUrl, theme.colors);
     document.documentElement.dataset.heigeCodexSkin = data.customId;
     ensureCustomRow(theme);
     paint(data.customId);
-    writeSelected(data.customId);
+    if (persist) writeSelected(data.customId);
+    if (broadcast) publish("theme", data.customId);
   };
 
   let customRow = null;
@@ -750,6 +773,7 @@ export function buildSkinMenuScript({
 
   // ---- 常驻开关：只显示控制器确认的真实状态，不使用 localStorage 伪造持久化 ----
   let getPersistenceState = () => null;
+  let applyRemotePersistence = () => false;
   if (data.control?.available === true) {
     const section = document.createElement("section");
     section.dataset.heigeRole = "persistence-section";
@@ -885,8 +909,10 @@ export function buildSkinMenuScript({
           ) {
             throw new Error("后台响应无效，开关未更改");
           }
+          if (body.revision <= controlRevision) return;
           persistenceEnabled = target;
           controlRevision = body.revision;
+          publish("persistence", { enabled: persistenceEnabled, revision: controlRevision });
           showAlert(target
             ? "常驻已开启，下次启动继续使用皮肤。"
             : "常驻已关闭。本次继续使用，下次启动恢复原生界面。\\n重新启用：打开「HeiGe 皮肤启动器」，或在 Codex 中说「启用 HeiGe 皮肤」。",
@@ -915,6 +941,16 @@ export function buildSkinMenuScript({
         pending = false;
         paintPersistence();
       }
+    };
+    applyRemotePersistence = (value) => {
+      assertCurrent();
+      if (value.revision <= controlRevision) return false;
+      persistenceEnabled = value.enabled;
+      controlRevision = value.revision;
+      confirmation.hidden = true;
+      hideAlert();
+      paintPersistence();
+      return true;
     };
     const activatePersistenceSwitch = () => {
       assertCurrent();
@@ -948,14 +984,16 @@ export function buildSkinMenuScript({
   const FULL_BUTTON_CSS = button.style.cssText;
   const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:10px;height:10px;border-radius:50%;border:none;background:rgba(120,130,140,.55);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer;font-size:0;padding:0;opacity:.35;-webkit-app-region:no-drag;";
   let hidden = false;
-  const setHidden = (value, persist = true) => {
+  const setHidden = (value, persist = true, broadcast = true) => {
     assertCurrent();
+    if (typeof value !== "boolean") return;
     hidden = value;
     button.style.cssText = value ? MINI_BUTTON_CSS : FULL_BUTTON_CSS;
     button.textContent = value ? "" : "\\u{1F3A8}";
     button.title = value ? "\\u663e\\u793a\\u6362\\u80a4\\u6309\\u94ae" : "HeiGe Codex Skin Studio";
     if (value) panel.style.display = "none";
     if (persist) writeHidden(value);
+    if (broadcast) publish("menu-hidden", value);
   };
   listen(button, "mouseenter", () => { if (hidden) { button.style.opacity = ".9"; button.style.transform = "scale(1.5)"; } });
   listen(button, "mouseleave", () => { if (hidden) { button.style.opacity = ".35"; button.style.transform = "scale(1)"; } });
@@ -964,6 +1002,89 @@ export function buildSkinMenuScript({
 
   const saved = loadCustom();
   if (saved) ensureCustomRow(saved);
+
+  const receivedSequences = new Map();
+  const rememberSequence = (senderGeneration, sequence) => {
+    if (!receivedSequences.has(senderGeneration) && receivedSequences.size >= 256) {
+      receivedSequences.delete(receivedSequences.keys().next().value);
+    }
+    receivedSequences.delete(senderGeneration);
+    receivedSequences.set(senderGeneration, sequence);
+  };
+  const exactKeys = (value, expected) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const keys = Object.keys(value).sort();
+    const sorted = [...expected].sort();
+    return keys.length === sorted.length && keys.every((key, index) => key === sorted[index]);
+  };
+  const normalizeBroadcast = (message) => {
+    if (!exactKeys(message, ["schemaVersion", "senderGeneration", "sequence", "kind", "value"])) return null;
+    if (
+      message.schemaVersion !== 1
+      || typeof message.senderGeneration !== "string"
+      || !/^[0-9a-f]{32}$/.test(message.senderGeneration)
+      || message.senderGeneration === generation
+      || !Number.isSafeInteger(message.sequence)
+      || message.sequence < 1
+      || !["theme", "menu-hidden", "persistence"].includes(message.kind)
+    ) return null;
+    if (message.kind === "theme") {
+      if (
+        typeof message.value !== "string"
+        || (
+          message.value !== data.nativeSel
+          && message.value !== data.customId
+          && !data.themes.some((theme) => theme.id === message.value)
+        )
+      ) return null;
+    } else if (message.kind === "menu-hidden") {
+      if (typeof message.value !== "boolean") return null;
+    } else if (
+      !exactKeys(message.value, ["enabled", "revision"])
+      || typeof message.value.enabled !== "boolean"
+      || !Number.isSafeInteger(message.value.revision)
+      || message.value.revision < 0
+    ) return null;
+    return message;
+  };
+  const receiveBroadcast = (event) => {
+    try {
+      const message = normalizeBroadcast(event?.data);
+      if (message === null) return;
+      const previous = receivedSequences.get(message.senderGeneration) ?? 0;
+      if (message.sequence <= previous) return;
+      if (message.kind === "theme" && message.value === data.customId) {
+        const custom = currentCustom ?? loadCustom();
+        if (!custom) return;
+        applyCustomTheme(custom, true, false);
+      } else if (message.kind === "theme" && message.value === data.nativeSel) {
+        clearTheme(true, false);
+      } else if (message.kind === "theme") {
+        setTheme(message.value, true, false);
+      } else if (message.kind === "menu-hidden") {
+        setHidden(message.value, true, false);
+      } else {
+        applyRemotePersistence(message.value);
+      }
+      rememberSequence(message.senderGeneration, message.sequence);
+    } catch {}
+  };
+  if (rawChannel !== null) listen(rawChannel, "message", receiveBroadcast);
+  listen(window, "storage", (event) => {
+    try {
+      if (event.key === data.selectedKey) {
+        if (event.newValue === data.nativeSel) clearTheme(false, false);
+        else if (event.newValue === data.customId) {
+          const custom = currentCustom ?? loadCustom();
+          if (custom) applyCustomTheme(custom, false, false);
+        } else if (data.themes.some((theme) => theme.id === event.newValue)) {
+          setTheme(event.newValue, false, false);
+        }
+      } else if (event.key === data.hiddenKey && (event.newValue === "1" || event.newValue === null)) {
+        setHidden(event.newValue === "1", false, false);
+      }
+    } catch {}
+  });
 
   listen(button, "click", () => {
     assertCurrent();
@@ -978,18 +1099,18 @@ export function buildSkinMenuScript({
   const restore = () => {
     if (data.preferStored) {
       const sel = readSelected();
-      if (sel === data.nativeSel) { clearTheme(false); return; }
+      if (sel === data.nativeSel) { clearTheme(false, false); return; }
       if (sel === data.customId) {
         const custom = currentCustom ?? loadCustom();
-        if (custom) { applyCustomTheme(custom); return; }
+        if (custom) { applyCustomTheme(custom, false, false); return; }
       }
-      if (sel && data.themes.some((t) => t.id === sel)) { setTheme(sel, false); return; }
+      if (sel && data.themes.some((t) => t.id === sel)) { setTheme(sel, false, false); return; }
     }
-    if (data.activeId === null) clearTheme();
-    else setTheme(data.activeId);
+    if (data.activeId === null) clearTheme(true, false);
+    else setTheme(data.activeId, true, false);
   };
   restore();
-  if (readHidden()) setHidden(true, false);
+  if (readHidden()) setHidden(true, false, false);
 
   // 供脚本化调用与测试：window.__heigeCodexSkin.importFromDataUrl(dataUrl, name)
   statusSnapshot = () => {

@@ -51,6 +51,13 @@ async function flushMicrotasks(window) {
 export async function menuWindow({
   persistenceEnabled = true,
   revision = 7,
+  BroadcastChannelClass,
+  entries = [{
+    id: "miku-488137",
+    name: "Miku 488137",
+    accent: "#19c9e5",
+    css: "html { color: #123456; }",
+  }],
   fetch = async () => okResponse({
     persistenceEnabled: !persistenceEnabled,
     revision: revision + 1,
@@ -58,16 +65,12 @@ export async function menuWindow({
 } = {}) {
   const window = new Window({ url: "app://-/index.html" });
   window.fetch = fetch;
+  if (BroadcastChannelClass) window.BroadcastChannel = BroadcastChannelClass;
   const buildOptions = {
     styleId: "heige-codex-skin-style",
     menuId: "heige-codex-skin-menu",
     activeId: "miku-488137",
-    entries: [{
-      id: "miku-488137",
-      name: "Miku 488137",
-      accent: "#19c9e5",
-      css: "html { color: #123456; }",
-    }],
+    entries,
     control: {
       available: true,
       persistenceEnabled,
@@ -87,6 +90,10 @@ export async function menuWindow({
     get switch() { return query("persistence-switch"); },
     get confirmation() { return query("persistence-confirmation"); },
     get alert() { return query("persistence-alert"); },
+    get themeId() { return window.document.documentElement.dataset.heigeCodexSkin ?? null; },
+    get hidden() {
+      return window.document.querySelector("#heige-codex-skin-menu > button").textContent === "";
+    },
     get controlRevision() {
       return window.__heigeCodexSkin.getPersistenceState().revision;
     },
@@ -117,6 +124,18 @@ export async function menuWindow({
         bubbles: true,
         cancelable: true,
       }));
+      await flushMicrotasks(window);
+    },
+    async pickTheme(id) {
+      window.__heigeCodexSkin.setTheme(id);
+      await flushMicrotasks(window);
+    },
+    async pickNative() {
+      window.__heigeCodexSkin.clearTheme();
+      await flushMicrotasks(window);
+    },
+    async hideMenu() {
+      window.__heigeCodexSkin.setHidden(true);
       await flushMicrotasks(window);
     },
     async flush() {

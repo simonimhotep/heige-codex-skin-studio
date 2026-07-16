@@ -9,6 +9,51 @@ import {
   sequenceFetch,
 } from "./helpers/menu-window.mjs";
 
+class SharedBroadcastChannel {
+  static channels = new Map();
+  static messages = [];
+
+  static reset() {
+    this.channels.clear();
+    this.messages = [];
+  }
+
+  constructor(name) {
+    this.name = name;
+    this.listeners = new Set();
+    this.closed = false;
+    const channels = SharedBroadcastChannel.channels.get(name) ?? new Set();
+    channels.add(this);
+    SharedBroadcastChannel.channels.set(name, channels);
+  }
+
+  addEventListener(type, listener) {
+    if (type === "message") this.listeners.add(listener);
+  }
+
+  removeEventListener(type, listener) {
+    if (type === "message") this.listeners.delete(listener);
+  }
+
+  postMessage(value) {
+    if (this.closed) throw new Error("channel closed");
+    const message = structuredClone(value);
+    SharedBroadcastChannel.messages.push(message);
+    for (const peer of SharedBroadcastChannel.channels.get(this.name) ?? []) {
+      if (peer === this || peer.closed) continue;
+      queueMicrotask(() => {
+        for (const listener of peer.listeners) listener({ data: structuredClone(message) });
+      });
+    }
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    SharedBroadcastChannel.channels.get(this.name)?.delete(this);
+  }
+}
+
 function png(width, height, bytes = 24) {
   const result = Buffer.alloc(Math.max(bytes, 24));
   Buffer.from("89504e470d0a1a0a", "hex").copy(result, 0);
@@ -521,4 +566,143 @@ test("storage quota failure keeps only the current generation and says restart w
   assert.match(alert.textContent, /本次已应用.*重启后不会保留/);
   assert.equal(page.document.documentElement.dataset.heigeCodexSkin, "custom-upload");
   assert.equal(page.window.localStorage.getItem("heigeCodexCustomTheme"), null);
+});
+
+test("theme native hidden and persistence ACK synchronize to a second renderer", async (t) => {
+  SharedBroadcastChannel.reset();
+  const entries = [
+    {
+      id: "miku-488137",
+      name: "Miku 488137",
+      accent: "#19c9e5",
+      css: "html { color: #123456; }",
+    },
+    {
+      id: "night-city",
+      name: "Night City",
+      accent: "#4455aa",
+      css: "html { color: #eeeeee; }",
+    },
+  ];
+  const left = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel, entries });
+  const right = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel, entries });
+  t.after(() => { left.close(); right.close(); SharedBroadcastChannel.reset(); });
+
+  await left.pickTheme("night-city");
+  await right.flush();
+  assert.equal(right.themeId, "night-city");
+  assert.equal(right.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
+
+  await left.pickNative();
+  await right.flush();
+  assert.equal(right.themeId, null);
+
+  await left.hideMenu();
+  await right.flush();
+  assert.equal(right.hidden, true);
+  assert.equal(right.window.localStorage.getItem("heigeCodexSkinMenuHidden"), "1");
+
+  await left.disablePersistence();
+  await right.flush();
+  assert.equal(right.switch.getAttribute("aria-checked"), "false");
+  assert.equal(right.controlRevision, left.controlRevision);
+  const persistenceMessage = SharedBroadcastChannel.messages.find(({ kind }) => kind === "persistence");
+  assert.deepEqual(Object.keys(persistenceMessage).sort(), [
+    "kind", "schemaVersion", "senderGeneration", "sequence", "value",
+  ]);
+  assert.doesNotMatch(JSON.stringify(persistenceMessage), /token|endpoint|43123/i);
+});
+
+test("broadcast protocol rejects loops stale sequences unknown fields and malformed values", async (t) => {
+  SharedBroadcastChannel.reset();
+  const page = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel });
+  t.after(() => { page.close(); SharedBroadcastChannel.reset(); });
+  const attacker = new SharedBroadcastChannel("heige-codex-skin-v2");
+  t.after(() => attacker.close());
+  const senderGeneration = "a".repeat(32);
+
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration,
+    sequence: 2,
+    kind: "theme",
+    value: "__heige_native__",
+  });
+  await page.flush();
+  assert.equal(page.themeId, null);
+
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration,
+    sequence: 1,
+    kind: "theme",
+    value: "miku-488137",
+  });
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration,
+    sequence: 3,
+    kind: "menu-hidden",
+    value: "yes",
+  });
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration,
+    sequence: 4,
+    kind: "theme",
+    value: "miku-488137",
+    token: "must-not-be-accepted",
+  });
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration: page.window.__heigeCodexSkin.generation,
+    sequence: 99,
+    kind: "theme",
+    value: "miku-488137",
+  });
+  attacker.postMessage({
+    schemaVersion: 2,
+    senderGeneration: "b".repeat(32),
+    sequence: 1,
+    kind: "theme",
+    value: "miku-488137",
+  });
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration: "c".repeat(32),
+    sequence: 1,
+    kind: "unknown",
+    value: true,
+  });
+  attacker.postMessage({
+    schemaVersion: 1,
+    senderGeneration: "d".repeat(32),
+    sequence: 1,
+    kind: "persistence",
+    value: { enabled: false, revision: 99, endpoint: "http://attacker.invalid" },
+  });
+  await page.flush();
+  assert.equal(page.themeId, null, "stale and extra-field messages are inert");
+  assert.equal(page.hidden, false, "malformed hidden value is inert");
+  assert.equal(SharedBroadcastChannel.messages.length, 8, "remote changes never echo back");
+});
+
+test("storage compatibility events update theme and hidden state without broadcast loops", async (t) => {
+  SharedBroadcastChannel.reset();
+  const page = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel });
+  t.after(() => { page.close(); SharedBroadcastChannel.reset(); });
+  const storageEvent = (key, newValue) => {
+    const event = new page.window.Event("storage");
+    Object.defineProperties(event, {
+      key: { value: key },
+      newValue: { value: newValue },
+    });
+    page.window.dispatchEvent(event);
+  };
+  storageEvent("heigeCodexSkinSelected", "__heige_native__");
+  storageEvent("heigeCodexSkinMenuHidden", "1");
+  await page.flush();
+  assert.equal(page.themeId, null);
+  assert.equal(page.hidden, true);
+  assert.equal(SharedBroadcastChannel.messages.length, 0);
 });
