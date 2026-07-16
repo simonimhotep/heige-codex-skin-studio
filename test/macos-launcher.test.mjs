@@ -268,3 +268,34 @@ test("generated Info.plist passes the macOS plist validator", {
   const { stdout } = await execFileAsync("plutil", ["-lint", result.plistPath]);
   assert.match(stdout, /OK/);
 });
+
+test("preserves both the operation and lock-release errors", async (t) => {
+  const { home, installRoot } = await fixture(t);
+  await installMacosLauncher({ home, installRoot });
+  const ownerPath = join(
+    home,
+    "Applications",
+    ".heige-codex-skin-launcher-install.lock",
+    "owner.json",
+  );
+  await assert.rejects(
+    installMacosLauncher({
+      home,
+      installRoot,
+      hooks: {
+        afterPublish: async () => {
+          await writeFile(ownerPath, '{"foreign":true}\n', { mode: 0o600 });
+          throw new Error("SIMULATED_OPERATION_FAILURE");
+        },
+      },
+    }),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.match(error.message, /operation.*lock/i);
+      assert.equal(error.errors.length, 2);
+      assert.match(error.errors[0].message, /SIMULATED_OPERATION_FAILURE/);
+      assert.match(error.errors[1].message, /ownership|安全释放/);
+      return true;
+    },
+  );
+});

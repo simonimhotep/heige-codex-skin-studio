@@ -530,6 +530,7 @@ export async function installMacosLauncher({ home, installRoot, hooks = {}, isPr
   const appPath = join(applications, `${MACOS_LAUNCHER_NAME}.app`);
   const journalPath = join(applications, TRANSACTION_FILE);
   const releaseLock = await acquireInstallLock(applications, isProcessAlive);
+  let operationError = null;
   try {
     await recoverTransaction({ appPath, journalPath });
     const existing = await pathInfo(appPath);
@@ -581,7 +582,20 @@ export async function installMacosLauncher({ home, installRoot, hooks = {}, isPr
       }
       throw error;
     }
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    await releaseLock();
+    try {
+      await releaseLock();
+    } catch (releaseError) {
+      if (operationError !== null) {
+        throw new AggregateError(
+          [operationError, releaseError],
+          "launcher operation 与 install lock 释放同时失败",
+        );
+      }
+      throw releaseError;
+    }
   }
 }
