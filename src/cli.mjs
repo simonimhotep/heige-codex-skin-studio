@@ -664,7 +664,13 @@ export async function enforceMacosInstallFence({
   const readState = dependencies.readState ?? readStudioState;
   const readTransition = dependencies.readTransition ?? readTransitionJournal;
   const journal = await readJournal(journalPath, { lease });
-  if (journal === null) return { allowed: true, transactionId: null };
+  const startupOuterTransaction = startupHandshake?.outerTransaction;
+  if (journal === null) {
+    if (authorization !== null || startupOuterTransaction != null) {
+      throw macosInstallFenceError(operation);
+    }
+    return { allowed: true, transactionId: null };
+  }
   const expectedState = journal.stateParticipant?.afterState;
   if (
     journal.decision !== "undecided" ||
@@ -696,6 +702,14 @@ export async function enforceMacosInstallFence({
     return { allowed: true, transactionId: journal.transactionId, role: authorization.role };
   }
   const requestCreatedAt = Date.parse(startupHandshake?.createdAt);
+  const backgroundOuterMatches =
+    startupOuterTransaction !== null &&
+    typeof startupOuterTransaction === "object" &&
+    !Array.isArray(startupOuterTransaction) &&
+    Object.keys(startupOuterTransaction).sort().join("\0") ===
+      ["journalPath", "transactionId"].join("\0") &&
+    startupOuterTransaction.transactionId === journal.transactionId &&
+    startupOuterTransaction.journalPath === journalPath;
   const backgroundAllowed =
     operation === "controller:start" &&
     startupHandshake !== null &&
@@ -704,6 +718,7 @@ export async function enforceMacosInstallFence({
     startupHandshake.platform === "darwin" &&
     startupHandshake.backgroundIdentity === CONTROLLER_LAUNCH_AGENT_LABEL &&
     backgroundIdentity === CONTROLLER_LAUNCH_AGENT_LABEL &&
+    backgroundOuterMatches &&
     Number.isFinite(requestCreatedAt) &&
     requestCreatedAt >= Date.parse(journal.createdAt);
   if (backgroundAllowed) {
@@ -1100,6 +1115,12 @@ export async function productionController({
         transitionNonce,
         platform,
         backgroundIdentity,
+        outerTransaction: installAuthorization === null
+          ? null
+          : {
+            transactionId: installAuthorization.transactionId,
+            journalPath: installAuthorization.journalPath,
+          },
       });
       return { notBefore: Date.parse(request.createdAt) };
     },

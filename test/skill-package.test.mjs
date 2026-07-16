@@ -118,6 +118,7 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
     "heige-codex-skin-studio/README.md",
     "heige-codex-skin-studio/payload/src/cli.mjs",
     "heige-codex-skin-studio/payload/src/lifecycle-helper.mjs",
+    "heige-codex-skin-studio/payload/src/macos-launcher.mjs",
     "heige-codex-skin-studio/payload/scripts/enable-skin.command",
     "heige-codex-skin-studio/payload/scripts/resume.command",
     "heige-codex-skin-studio/payload/package.json",
@@ -149,6 +150,25 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
   );
   assert.match(packagedLauncher, /apply --prefer-stored --port/);
   assert.doesNotMatch(packagedLauncher, /\$\{1:-miku-488137\}/);
+
+  const packagedMacosLauncher = await readZipText(
+    archive,
+    "heige-codex-skin-studio/payload/src/macos-launcher.mjs",
+  );
+  assert.equal(
+    packagedMacosLauncher,
+    await readFile(join(repoRoot, "src/macos-launcher.mjs"), "utf8"),
+    "the reusable skill must carry the audited macOS launcher byte-for-byte",
+  );
+  assert.match(packagedMacosLauncher, /MACOS_LAUNCHER_SCHEMA_VERSION = 2/);
+  assert.match(packagedMacosLauncher, /const entrypoint = join\(scripts, "apply\.command"\);/);
+
+  const packagedSkill = await readZipText(
+    archive,
+    "heige-codex-skin-studio/SKILL.md",
+  );
+  assert.match(packagedSkill, /只会调用 `apply\.command`/);
+  assert.match(packagedSkill, /保持 `persistenceEnabled=false`/);
 });
 
 test("CLI requires exact explicit absolute output and epoch arguments", async (t) => {

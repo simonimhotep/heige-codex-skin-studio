@@ -21,7 +21,7 @@ import { readProcessIdentity, sameProcessIdentity } from "./process-identity.mjs
 
 export const MACOS_LAUNCHER_NAME = "HeiGe 皮肤启动器";
 export const MACOS_LAUNCHER_BUNDLE_ID = "com.heige.codex-skin-launcher";
-export const MACOS_LAUNCHER_SCHEMA_VERSION = 1;
+export const MACOS_LAUNCHER_SCHEMA_VERSION = 2;
 const EXECUTABLE_NAME = "HeiGe Skin Launcher";
 const GENERATOR_ID = "heige-codex-skin-studio";
 const MAX_GENERATED_FILE_BYTES = 64 * 1024;
@@ -143,9 +143,13 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-export function renderMacosLauncherExecutable(entrypoint) {
+function renderMacosLauncherExecutableVersion(entrypoint, schema) {
   entrypoint = assertAbsolutePath(entrypoint, "launcher entrypoint");
-  return `#!/bin/zsh\n# HeiGe generated launcher schema ${MACOS_LAUNCHER_SCHEMA_VERSION}\nset -euo pipefail\nexec ${shellQuote(entrypoint)}\n`;
+  return `#!/bin/zsh\n# HeiGe generated launcher schema ${schema}\nset -euo pipefail\nexec ${shellQuote(entrypoint)}\n`;
+}
+
+export function renderMacosLauncherExecutable(entrypoint) {
+  return renderMacosLauncherExecutableVersion(entrypoint, MACOS_LAUNCHER_SCHEMA_VERSION);
 }
 
 export function renderMacosLauncherPlist(installRoot) {
@@ -200,14 +204,14 @@ async function requireStableEntrypoint(installRoot) {
   if (canonicalScripts !== join(canonicalRoot, "scripts")) {
     throw new Error("scripts 必须位于 stable installRoot 内");
   }
-  const entrypoint = join(scripts, "enable-skin.command");
+  const entrypoint = join(scripts, "apply.command");
   const info = await lstat(entrypoint);
   if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error("enable-skin.command 必须是 regular file 且不得是符号链接");
+    throw new Error("apply.command 必须是 regular file 且不得是符号链接");
   }
-  if ((info.mode & 0o111) === 0) throw new Error("enable-skin.command 必须可执行");
-  if (await realpath(entrypoint) !== join(canonicalRoot, "scripts", "enable-skin.command")) {
-    throw new Error("enable-skin.command 必须位于 stable installRoot 内");
+  if ((info.mode & 0o111) === 0) throw new Error("apply.command 必须可执行");
+  if (await realpath(entrypoint) !== join(canonicalRoot, "scripts", "apply.command")) {
+    throw new Error("apply.command 必须位于 stable installRoot 内");
   }
   return entrypoint;
 }
@@ -275,7 +279,9 @@ function parseAttributedPlist(text) {
     /<key>HeiGeLauncherSchemaVersion<\/key>\s*<integer>(\d+)<\/integer>/g,
     "HeiGeLauncherSchemaVersion",
   ));
-  if (schema !== MACOS_LAUNCHER_SCHEMA_VERSION) throw new Error("不支持的 generated launcher schema");
+  if (![1, MACOS_LAUNCHER_SCHEMA_VERSION].includes(schema)) {
+    throw new Error("不支持的 generated launcher schema");
+  }
   if (plistString(text, "CFBundleIdentifier") !== MACOS_LAUNCHER_BUNDLE_ID) {
     throw new Error("generated launcher bundle id 不匹配");
   }
@@ -315,11 +321,16 @@ async function validateAttributedBundle(appPath, expected = null) {
       readSmallRegular(plistPath, "Info.plist"),
     ]);
     const attribution = parseAttributedPlist(plist);
-    if (executable !== renderMacosLauncherExecutable(join(
+    const entrypointName = attribution.schema === 1
+      ? "enable-skin.command"
+      : "apply.command";
+    if (executable !== renderMacosLauncherExecutableVersion(join(
       attribution.installRoot,
       "scripts",
-      "enable-skin.command",
-    ))) throw new Error("generated launcher executable 与 attributed installRoot 不匹配");
+      entrypointName,
+    ), attribution.schema)) {
+      throw new Error("generated launcher executable 与 attributed installRoot 不匹配");
+    }
     if ((executableInfo.mode & 0o777) !== 0o755 || (plistInfo.mode & 0o777) !== 0o644) {
       throw new Error("generated bundle 权限不正确");
     }
@@ -871,7 +882,7 @@ function expectedLauncher(installRoot) {
   const executable = renderMacosLauncherExecutable(join(
     installRoot,
     "scripts",
-    "enable-skin.command",
+    "apply.command",
   ));
   const plist = renderMacosLauncherPlist(installRoot);
   return {

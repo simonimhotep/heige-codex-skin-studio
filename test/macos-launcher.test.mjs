@@ -27,7 +27,7 @@ async function fixture(t, suffix = "用户 空格") {
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "家 目录");
   const installRoot = join(home, ".codex", "heige-codex-skin-studio");
-  const entrypoint = join(installRoot, "scripts", "enable-skin.command");
+  const entrypoint = join(installRoot, "scripts", "apply.command");
   await mkdir(join(installRoot, "scripts"), { recursive: true });
   await writeFile(entrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
   await chmod(entrypoint, 0o755);
@@ -47,15 +47,16 @@ async function waitForPath(child, path, stderr) {
   throw new Error(`child did not reach launcher prepare boundary: ${stderr()}`);
 }
 
-test("creates a Finder-visible local app that calls only the stable enable entrypoint", async (t) => {
+test("creates a Finder-visible local app that calls only the current-session apply entrypoint", async (t) => {
   const { home, installRoot, entrypoint } = await fixture(t);
   const result = await installMacosLauncher({ home, installRoot });
   assert.equal(result.appPath, join(home, "Applications", "HeiGe 皮肤启动器.app"));
   assert.equal(result.executablePath, join(result.appPath, "Contents", "MacOS", "HeiGe Skin Launcher"));
   const executable = await readFile(result.executablePath, "utf8");
   const plist = await readFile(join(result.appPath, "Contents", "Info.plist"), "utf8");
-  assert.match(executable, /^#!\/bin\/zsh\n# HeiGe generated launcher schema 1\nset -euo pipefail\nexec /);
+  assert.match(executable, /^#!\/bin\/zsh\n# HeiGe generated launcher schema 2\nset -euo pipefail\nexec /);
   assert.match(executable, new RegExp(entrypoint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(executable, /enable-skin\.command/);
   assert.doesNotMatch(executable, /curl|osascript|sudo|\$HOME|\$\{/);
   assert.match(plist, /com\.heige\.codex-skin-launcher/);
   assert.match(plist, /HeiGe 皮肤启动器/);
@@ -109,7 +110,7 @@ test("serializable launcher participant retains the old bundle until outer final
   const original = await installMacosLauncher({ home, installRoot });
   const originalExecutable = await readFile(original.executablePath);
   const nextInstallRoot = join(home, ".codex", "heige-codex-skin-studio-next");
-  const nextEntrypoint = join(nextInstallRoot, "scripts", "enable-skin.command");
+  const nextEntrypoint = join(nextInstallRoot, "scripts", "apply.command");
   await mkdir(join(nextInstallRoot, "scripts"), { recursive: true });
   await writeFile(nextEntrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
   await chmod(nextEntrypoint, 0o755);
@@ -154,7 +155,7 @@ test("launcher participant can be reconstructed after a publisher process is SIG
   const original = await installMacosLauncher({ home, installRoot });
   const originalExecutable = await readFile(original.executablePath);
   const nextInstallRoot = join(home, ".codex", "cross-process-next");
-  const nextEntrypoint = join(nextInstallRoot, "scripts", "enable-skin.command");
+  const nextEntrypoint = join(nextInstallRoot, "scripts", "apply.command");
   await mkdir(join(nextInstallRoot, "scripts"), { recursive: true });
   await writeFile(nextEntrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
   await chmod(nextEntrypoint, 0o755);
@@ -209,7 +210,7 @@ test("escapes plist XML and shell-quotes a stable path with punctuation", async 
   const { root } = await fixture(t, "base");
   const home = join(root, "家 & <目录>");
   const installRoot = join(home, ".codex", "HeiGe's $studio");
-  const entrypoint = join(installRoot, "scripts", "enable-skin.command");
+  const entrypoint = join(installRoot, "scripts", "apply.command");
   await mkdir(join(installRoot, "scripts"), { recursive: true });
   await writeFile(entrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
   await chmod(entrypoint, 0o755);
@@ -244,18 +245,32 @@ test("replaces only an attributed generated bundle and restores it after publish
 test("upgrades an attributed older generated bundle and can move its stable install root", async (t) => {
   const { home, installRoot } = await fixture(t);
   const first = await installMacosLauncher({ home, installRoot });
+  const legacyEntrypoint = join(installRoot, "scripts", "enable-skin.command");
+  await writeFile(legacyEntrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
+  await chmod(legacyEntrypoint, 0o755);
+  await writeFile(
+    first.executablePath,
+    renderMacosLauncherExecutable(legacyEntrypoint).replace("schema 2", "schema 1"),
+    { mode: 0o755 },
+  );
+  await chmod(first.executablePath, 0o755);
   const plistPath = join(first.appPath, "Contents", "Info.plist");
   const oldPlist = await readFile(plistPath, "utf8");
   await writeFile(
     plistPath,
-    oldPlist.replace(
-      "<key>CFBundleShortVersionString</key>\n    <string>1.0</string>",
-      "<key>CFBundleShortVersionString</key>\n    <string>0.9</string>",
-    ),
+    oldPlist
+      .replace(
+        "<key>CFBundleShortVersionString</key>\n    <string>1.0</string>",
+        "<key>CFBundleShortVersionString</key>\n    <string>0.9</string>",
+      )
+      .replace(
+        "<key>HeiGeLauncherSchemaVersion</key>\n    <integer>2</integer>",
+        "<key>HeiGeLauncherSchemaVersion</key>\n    <integer>1</integer>",
+      ),
   );
 
   const nextInstallRoot = join(home, ".codex", "heige-codex-skin-studio-v2");
-  const nextEntrypoint = join(nextInstallRoot, "scripts", "enable-skin.command");
+  const nextEntrypoint = join(nextInstallRoot, "scripts", "apply.command");
   await mkdir(join(nextInstallRoot, "scripts"), { recursive: true });
   await writeFile(nextEntrypoint, "#!/bin/zsh\nexit 0\n", { mode: 0o755 });
   await chmod(nextEntrypoint, 0o755);
@@ -263,6 +278,8 @@ test("upgrades an attributed older generated bundle and can move its stable inst
   const upgraded = await installMacosLauncher({ home, installRoot: nextInstallRoot });
   const executable = await readFile(upgraded.executablePath, "utf8");
   assert.match(executable, new RegExp(nextEntrypoint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(executable, /generated launcher schema 2/);
+  assert.doesNotMatch(executable, /enable-skin\.command/);
   assert.doesNotMatch(executable, new RegExp(join(installRoot, "scripts").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(await readFile(upgraded.plistPath, "utf8"), /<string>1\.0<\/string>/);
 });

@@ -40,7 +40,8 @@ Windows 用户也可双击 `scripts\install.bat`。Windows 入口只转发到包
 
 - `apply`：仅应用当前会话，不改变下次启动的常驻选择。
 - 顶部菜单「皮肤常驻」开关：打开后下次启动继续使用；关闭后本次继续使用，下次启动恢复原生界面。
-- 关闭后如需重新启用，macOS 打开 `$HOME/Applications/HeiGe 皮肤启动器.app`；Windows 从开始菜单打开「HeiGe 皮肤启动器」。也可向 Codex 说「启用 HeiGe 皮肤」。
+- 「启用皮肤」与「开启常驻」是两个意图。关闭后，macOS 打开 `$HOME/Applications/HeiGe 皮肤启动器.app` 只会调用 `apply.command`，恢复当前会话的最近非原生主题，并保持 `persistenceEnabled=false`。
+- 只有用户打开顶部「皮肤常驻」开关，或明确要求开启常驻时，才运行 `enable-skin.command`。不得用本地启动器代替这个用户决定。
 - 启动器未显式指定主题时，优先恢复上次非原生主题，只有没有历史选择时才使用 `miku-488137`。
 
 macOS 稳定入口是 `scripts/apply.command`、`scripts/enable-skin.command`、`scripts/pause.command`、`scripts/resume.command` 和 `scripts/restore.command`。Windows 对应入口是 `scripts\windows` 下的同名 `.ps1` 或 `.bat`。

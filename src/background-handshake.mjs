@@ -19,6 +19,7 @@ const PRIVATE_FILE_MODE = 0o600;
 const NONCE = /^[A-Za-z0-9_-]{1,128}$/;
 const PLATFORMS = new Set(["darwin", "win32"]);
 const OUTCOMES = new Set(["ready", "unregister"]);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HANDSHAKE_KEYS = Object.freeze([
   "backgroundIdentity",
   "createdAt",
@@ -33,11 +34,13 @@ const HANDSHAKE_KEYS = Object.freeze([
 const START_REQUEST_KEYS = Object.freeze([
   "backgroundIdentity",
   "createdAt",
+  "outerTransaction",
   "platform",
   "revision",
   "schemaVersion",
   "transitionNonce",
 ]);
+const OUTER_TRANSACTION_KEYS = Object.freeze(["journalPath", "transactionId"]);
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -95,11 +98,30 @@ function validateHandshake(value) {
   });
 }
 
-function validateStartRequest(value) {
+function validateOuterTransaction(value, stateRoot) {
+  if (value === null) return null;
+  if (
+    !exactKeys(value, OUTER_TRANSACTION_KEYS) ||
+    !UUID.test(value.transactionId) ||
+    typeof value.journalPath !== "string" ||
+    !isAbsolute(value.journalPath) ||
+    normalize(value.journalPath) !== value.journalPath ||
+    value.journalPath.includes("\0") ||
+    value.journalPath !== join(stateRoot, "macos-install.json")
+  ) {
+    throw new Error("background start request outer transaction is invalid");
+  }
+  return Object.freeze({
+    transactionId: value.transactionId,
+    journalPath: value.journalPath,
+  });
+}
+
+function validateStartRequest(value, stateRoot) {
   if (!exactKeys(value, START_REQUEST_KEYS)) {
     throw new Error("background start request schema has unknown or missing fields");
   }
-  if (value.schemaVersion !== 1) {
+  if (value.schemaVersion !== 2) {
     throw new Error("background start request schemaVersion is unsupported");
   }
   if (!Number.isSafeInteger(value.revision) || value.revision < 0) {
@@ -119,12 +141,14 @@ function validateStartRequest(value) {
   if (typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))) {
     throw new Error("background start request createdAt is invalid");
   }
+  const outerTransaction = validateOuterTransaction(value.outerTransaction, stateRoot);
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: value.revision,
     transitionNonce: value.transitionNonce,
     platform: value.platform,
     backgroundIdentity,
+    outerTransaction,
     createdAt: value.createdAt,
   });
 }
@@ -275,7 +299,7 @@ export async function readBackgroundStartRequest({ stateRoot } = {}) {
   return readPrivateDocument({
     stateRoot,
     path: backgroundStartRequestPath(stateRoot),
-    validate: validateStartRequest,
+    validate: (value) => validateStartRequest(value, stateRoot),
     description: "background start request",
   });
 }
@@ -342,13 +366,14 @@ export async function publishBackgroundStartRequest(input, {
   if (!isRecord(input)) throw new Error("background start request input is required");
   const stateRoot = validateStateRoot(input.stateRoot);
   const document = validateStartRequest({
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: input.revision,
     transitionNonce: input.transitionNonce,
     platform: input.platform,
     backgroundIdentity: input.backgroundIdentity,
+    outerTransaction: input.outerTransaction ?? null,
     createdAt: now().toISOString(),
-  });
+  }, stateRoot);
   const root = await ensurePrivateStateRoot(stateRoot);
   const path = backgroundStartRequestPath(stateRoot);
   const temporaryPath = join(stateRoot, `.${BACKGROUND_START_REQUEST_FILE}.${nonce()}.tmp`);
@@ -434,7 +459,7 @@ export async function claimBackgroundStartRequest({
     const request = await readPrivateDocument({
       stateRoot,
       path: claimedPath,
-      validate: validateStartRequest,
+      validate: (value) => validateStartRequest(value, stateRoot),
       description: "background start request",
     });
     if (request.platform !== platform) {

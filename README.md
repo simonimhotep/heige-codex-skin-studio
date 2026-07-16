@@ -29,7 +29,7 @@
 - **AI 生成主题**：把 Skill 交给 Codex，让它先用生图能力产出主图，再自动做成皮肤，无需额外 API Key。
 - **可选桌宠**：独立的 `Miku Future` 动画桌面宠物，不覆盖 Codex 内置宠物。
 - **生命周期分离**：`pause` 只暂停当前会话，`resume` 恢复当前会话；`restore` 关闭常驻，活跃皮肤会话才重启为原生界面，已关闭或已原生时不额外拉起。
-- **用户决定是否常驻**：顶部菜单提供带确认与说明的开关。关闭后本次继续使用；下次启动恢复原生界面。重新启用可打开本地「HeiGe 皮肤启动器」，也可向 Codex 说「启用 HeiGe 皮肤」。
+- **用户决定是否常驻**：顶部菜单提供带确认与说明的开关。关闭后本次继续使用；下次启动恢复原生界面。本地「HeiGe 皮肤启动器」只恢复当前会话的最近皮肤，不会代替用户打开常驻；需要下次启动继续使用时，再打开顶部常驻开关。
 
 | 项目 | 参数 |
 |---|---|
@@ -82,6 +82,7 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/restore.command"
 ```
 
 `apply.command` 只应用本次会话，不会暗中打开下次启动常驻。
+安装生成的本地「HeiGe 皮肤启动器」调用的就是这个入口：它会恢复 `lastNonNativeThemeId` 记录的最近非原生主题，但保持常驻选择不变。
 
 ### 常驻模式（macOS）
 
@@ -95,13 +96,13 @@ open "$HOME/.codex/heige-codex-skin-studio/scripts/enable-skin.command"
 "$HOME/.codex/heige-codex-skin-studio/scripts/lib/run-cli.zsh" set-persistence false --port 9341
 ```
 
-关闭后若想再次拉起皮肤，可打开安装时生成的本地应用：
+关闭后若想只在当前会话再次拉起最近的皮肤，可打开安装时生成的本地应用：
 
 ```bash
 open "$HOME/Applications/HeiGe 皮肤启动器.app"
 ```
 
-也可以在 Codex 中直接说「启用 HeiGe 皮肤」。这两个入口都只调用稳定的 `enable-skin.command`，不会下载代码或请求管理员权限。
+这个本地应用只调用稳定的 `apply.command`，不会下载代码、请求管理员权限或将 `persistenceEnabled` 改为 `true`。「启用 HeiGe 皮肤」表示恢复当前会话；若要重新开启下次启动常驻，请打开顶部「皮肤常驻」开关，或明确运行 `enable-skin.command`。
 
 ### Windows（新增，待实机验收）
 
@@ -207,7 +208,7 @@ node src/cli.mjs doctor
 
 ### 怎么让皮肤重启后也一直在？
 
-可在顶部菜单打开常驻开关，也可运行 `enable-skin.command`。关闭开关会先确认，并提示「关闭后本次继续使用；下次启动恢复原生界面」。以后想恢复时，打开「HeiGe 皮肤启动器」，或向 Codex 说「启用 HeiGe 皮肤」。
+可在顶部菜单打开常驻开关，也可明确运行 `enable-skin.command`。关闭开关会先确认，并提示「关闭后本次继续使用；下次启动恢复原生界面」。以后打开「HeiGe 皮肤启动器」只会恢复当前会话；必须由用户再打开菜单开关，才会恢复下次启动常驻。
 
 ### 本机回环端口是否等于安全？
 
@@ -228,7 +229,7 @@ npm run doctor
 
 ## English
 
-**HeiGe Codex Skin Studio** reskins Codex Desktop through loopback CDP injection without modifying `app.asar`, binaries, or signature resources. A top menu switches themes and controls next-launch persistence. Turning persistence off keeps the current session skinned and restores the native UI on the next launch. Re-enable through the local `HeiGe 皮肤启动器` app or tell Codex `启用 HeiGe 皮肤`.
+**HeiGe Codex Skin Studio** reskins Codex Desktop through loopback CDP injection without modifying `app.asar`, binaries, or signature resources. A top menu switches themes and controls next-launch persistence. Turning persistence off keeps the current session skinned and restores the native UI on the next launch. The local `HeiGe 皮肤启动器` restores the last skin for the current session only; next-launch persistence is enabled only by the user's explicit menu switch or `enable-skin.command`.
 
 Quick start: run `scripts/install.command` on macOS or `scripts\\windows\\install.bat` on Windows. macOS has dated live evidence in `docs/release`. Windows PowerShell automation is covered, while Microsoft Store/MSIX activation remains pending live-machine validation. A system Node runtime must be Node.js 22 or newer. CDP is unauthenticated even on loopback, so local same-user processes remain inside the threat boundary.
 

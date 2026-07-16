@@ -882,6 +882,10 @@ test("macOS install fence admits only exact foreground readiness and its one-sho
     transitionNonce: "outer-ready",
     platform: "darwin",
     backgroundIdentity: "com.heige.codex-skin-controller",
+    outerTransaction: {
+      transactionId: journal.transactionId,
+      journalPath,
+    },
     createdAt: "2026-07-17T08:00:01.000Z",
   };
   assert.equal((await enforceMacosInstallFence({
@@ -896,6 +900,18 @@ test("macOS install fence admits only exact foreground readiness and its one-sho
     startupHandshake: { ...startupHandshake, backgroundIdentity: "foreign" },
     backgroundIdentity: "com.heige.codex-skin-controller",
   }), (error) => error.code === "MACOS_INSTALL_IN_PROGRESS");
+  for (const outerTransaction of [
+    null,
+    { ...startupHandshake.outerTransaction, transactionId: "223e4567-e89b-42d3-a456-426614174000" },
+    { ...startupHandshake.outerTransaction, journalPath: "/private/state/foreign-install.json" },
+  ]) {
+    await assert.rejects(enforceMacosInstallFence({
+      ...base,
+      operation: "controller:start",
+      startupHandshake: { ...startupHandshake, outerTransaction },
+      backgroundIdentity: "com.heige.codex-skin-controller",
+    }), (error) => error.code === "MACOS_INSTALL_IN_PROGRESS");
+  }
 
   for (const [decision, phase] of [
     ["commit", "commit-decided"],
@@ -937,6 +953,180 @@ test("macOS install authorization parser rejects unknown fields and noncanonical
   ]) {
     assert.throws(() => parseMacosInstallAuthorization(JSON.stringify(value)), /schema|authorization/i);
   }
+});
+
+test("recovery-cleared install journal rejects stale foreground and background under the real state lock", async (t) => {
+  const { chmod, mkdir, mkdtemp, realpath, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const {
+    claimBackgroundStartRequest,
+    publishBackgroundStartRequest,
+  } = await import("../src/background-handshake.mjs");
+  const {
+    acquireOperationLock,
+    withOperationLock,
+  } = await import("../src/operation-lock.mjs");
+
+  const parent = await realpath(await mkdtemp(join(tmpdir(), "heige-stale-install-child-")));
+  const stateRoot = join(parent, "state");
+  await mkdir(stateRoot, { mode: 0o700 });
+  await chmod(stateRoot, 0o700);
+  t.after(() => rm(parent, { recursive: true, force: true }));
+
+  const journalPath = join(stateRoot, "macos-install.json");
+  const transactionId = "123e4567-e89b-42d3-a456-426614174000";
+  const expectedState = {
+    schemaVersion: 2,
+    persistenceEnabled: true,
+    selectedThemeId: "miku-488137",
+    lastNonNativeThemeId: "miku-488137",
+    controlToken: Buffer.alloc(32, 42).toString("base64url"),
+    lastTransitionNonce: null,
+    revision: 4,
+  };
+  let journal = {
+    transactionId,
+    decision: "undecided",
+    phase: "activation-planned",
+    activation: "controller",
+    createdAt: "2026-07-17T08:00:00.000Z",
+    stateParticipant: { afterState: structuredClone(expectedState) },
+  };
+  let authoritativeState = structuredClone(expectedState);
+  const authorization = parseMacosInstallAuthorization(JSON.stringify({
+    role: "macos-install-ready-foreground",
+    transactionId,
+    journalPath,
+    expectedRevision: expectedState.revision,
+    expectedControlToken: expectedState.controlToken,
+  }));
+  const outerTransaction = { transactionId, journalPath };
+  await publishBackgroundStartRequest({
+    stateRoot,
+    revision: expectedState.revision,
+    transitionNonce: "install-ready-4",
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    outerTransaction,
+  }, { now: () => new Date("2026-07-17T08:00:01.000Z") });
+
+  const recoveryIdentity = { pid: 51_001, startedAt: "recovery-start" };
+  const foregroundIdentity = { pid: 51_002, startedAt: "foreground-start" };
+  const backgroundIdentity = { pid: 51_003, startedAt: "background-start" };
+  const identities = new Map([
+    [recoveryIdentity.pid, recoveryIdentity],
+    [foregroundIdentity.pid, foregroundIdentity],
+    [backgroundIdentity.pid, backgroundIdentity],
+  ]);
+  const lockPath = join(stateRoot, "operation.lock");
+  const lockOptions = (identity, operation) => ({
+    identity,
+    lockPath,
+    operation,
+    readProcessIdentity: async (pid) => structuredClone(identities.get(pid) ?? null),
+    stateRoot,
+  });
+  const recoveryLease = await acquireOperationLock(
+    lockOptions(recoveryIdentity, "install:macos-clear-journal"),
+  );
+  await assert.rejects(
+    acquireOperationLock(lockOptions(foregroundIdentity, "controller:set-persistence")),
+    (error) => error.code === "LOCK_HELD",
+  );
+  journal = null;
+  authoritativeState = { ...authoritativeState, persistenceEnabled: false, revision: 5 };
+  assert.equal(await recoveryLease.release(), true);
+
+  const fenceInput = {
+    journalPath,
+    statePath: join(stateRoot, "state.json"),
+    transitionPath: join(stateRoot, "transition.json"),
+    dependencies: {
+      readJournal: async () => structuredClone(journal),
+      readState: async () => structuredClone(authoritativeState),
+      readTransition: async () => null,
+    },
+  };
+  let foregroundMutationStarted = false;
+  await assert.rejects(
+    withOperationLock(
+      lockOptions(foregroundIdentity, "controller:set-persistence"),
+      async (lease) => {
+        await enforceMacosInstallFence({
+          ...fenceInput,
+          lease,
+          operation: "controller:set-persistence",
+          authorization,
+          requestContext: {
+            desiredPersistenceEnabled: true,
+            expectedRevision: expectedState.revision,
+          },
+        });
+        foregroundMutationStarted = true;
+      },
+    ),
+    (error) => error.code === "MACOS_INSTALL_IN_PROGRESS",
+  );
+  assert.equal(foregroundMutationStarted, false);
+
+  const claimed = await claimBackgroundStartRequest({
+    stateRoot,
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    clock: () => Date.parse("2026-07-17T08:00:02.000Z"),
+  });
+  assert.deepEqual(claimed.outerTransaction, outerTransaction);
+  let backgroundMutationStarted = false;
+  await assert.rejects(
+    withOperationLock(
+      lockOptions(backgroundIdentity, "controller:start"),
+      async (lease) => {
+        await enforceMacosInstallFence({
+          ...fenceInput,
+          lease,
+          operation: "controller:start",
+          startupHandshake: claimed,
+          backgroundIdentity: "com.heige.codex-skin-controller",
+        });
+        backgroundMutationStarted = true;
+      },
+    ),
+    (error) => error.code === "MACOS_INSTALL_IN_PROGRESS",
+  );
+  assert.equal(backgroundMutationStarted, false);
+  assert.equal(authoritativeState.persistenceEnabled, false);
+
+  await publishBackgroundStartRequest({
+    stateRoot,
+    revision: authoritativeState.revision,
+    transitionNonce: "ordinary-start-5",
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    outerTransaction: null,
+  }, { now: () => new Date("2026-07-17T08:00:03.000Z") });
+  const ordinary = await claimBackgroundStartRequest({
+    stateRoot,
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    clock: () => Date.parse("2026-07-17T08:00:04.000Z"),
+  });
+  let ordinaryMutationStarted = false;
+  await withOperationLock(
+    lockOptions(backgroundIdentity, "controller:start"),
+    async (lease) => {
+      const result = await enforceMacosInstallFence({
+        ...fenceInput,
+        lease,
+        operation: "controller:start",
+        startupHandshake: ordinary,
+        backgroundIdentity: "com.heige.codex-skin-controller",
+      });
+      assert.deepEqual(result, { allowed: true, transactionId: null });
+      ordinaryMutationStarted = true;
+    },
+  );
+  assert.equal(ordinaryMutationStarted, true);
 });
 
 test("production readiness verifier preserves the real handshake through wait then consumes it exactly once", async (t) => {

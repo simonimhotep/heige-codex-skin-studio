@@ -48,6 +48,7 @@ function startRequest(overrides = {}) {
     transitionNonce: "controller-transition-7",
     platform: "darwin",
     backgroundIdentity: "com.heige.codex-skin-controller",
+    outerTransaction: null,
     ...overrides,
   };
 }
@@ -91,13 +92,34 @@ test("background start request is one exact token-free atomic 0600 document", as
 
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
   assert.deepEqual(published, {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ...startRequest(),
     createdAt: NOW.toISOString(),
   });
   const bytes = await readFile(path, "utf8");
   assert.doesNotMatch(bytes, /controlToken|token/i);
   assert.deepEqual(await readBackgroundStartRequest({ stateRoot }), published);
+});
+
+test("install start request preserves one exact outer transaction through claim", async () => {
+  const stateRoot = await privateRoot();
+  const outerTransaction = {
+    transactionId: "123e4567-e89b-42d3-a456-426614174000",
+    journalPath: join(stateRoot, "macos-install.json"),
+  };
+  const published = await publishBackgroundStartRequest({
+    stateRoot,
+    ...startRequest(),
+    outerTransaction,
+  }, { now: () => NOW });
+  assert.deepEqual(published.outerTransaction, outerTransaction);
+  const claimed = await claimBackgroundStartRequest({
+    stateRoot,
+    platform: "darwin",
+    backgroundIdentity: "com.heige.codex-skin-controller",
+    clock: () => NOW.getTime(),
+  });
+  assert.deepEqual(claimed.outerTransaction, outerTransaction);
 });
 
 test("background start request is atomically single-consumer and cannot replay", async () => {
@@ -127,7 +149,7 @@ test("a second writer cannot overwrite a pending one-shot request", async () => 
   assert.deepEqual(await readBackgroundStartRequest({ stateRoot }), original);
 });
 
-test("background start request rejects stale, wrong identity, wrong nonce, and symlink inputs", async (t) => {
+test("background start request rejects stale, wrong identity, malformed fields, and symlink inputs", async (t) => {
   await t.test("stale request is consumed and rejected", async () => {
     const stateRoot = await privateRoot();
     await publishBackgroundStartRequest({ stateRoot, ...startRequest() }, { now: () => NOW });
@@ -156,7 +178,7 @@ test("background start request rejects stale, wrong identity, wrong nonce, and s
   await t.test("malformed nonce", async () => {
     const stateRoot = await privateRoot();
     await writeFile(backgroundStartRequestPath(stateRoot), JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       ...startRequest({ transitionNonce: "wrong nonce" }),
       createdAt: NOW.toISOString(),
     }), { mode: 0o600 });
@@ -166,6 +188,27 @@ test("background start request rejects stale, wrong identity, wrong nonce, and s
       backgroundIdentity: "com.heige.codex-skin-controller",
       clock: () => NOW.getTime(),
     }), /nonce/i);
+  });
+
+  await t.test("malformed outer transaction", async () => {
+    const stateRoot = await privateRoot();
+    await writeFile(backgroundStartRequestPath(stateRoot), JSON.stringify({
+      schemaVersion: 2,
+      ...startRequest({
+        outerTransaction: {
+          transactionId: "123e4567-e89b-42d3-a456-426614174000",
+          journalPath: join(stateRoot, "foreign-install.json"),
+        },
+      }),
+      createdAt: NOW.toISOString(),
+    }), { mode: 0o600 });
+    await assert.rejects(claimBackgroundStartRequest({
+      stateRoot,
+      platform: "darwin",
+      backgroundIdentity: "com.heige.codex-skin-controller",
+      clock: () => NOW.getTime(),
+    }), /outer transaction/i);
+    assert.equal(await readBackgroundStartRequest({ stateRoot }), null);
   });
 
   await t.test("symlink", async () => {
