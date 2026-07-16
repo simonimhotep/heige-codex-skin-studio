@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -140,6 +141,22 @@ function deferred() {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+async function runNodeChild(source) {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const result = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  return { ...result, stderr };
 }
 
 test("a live owner is never stolen even with a stale heartbeat", async (t) => {
@@ -843,10 +860,15 @@ test("checkpoint compaction fences a contender linked from the old chain", async
     pid: 81_001,
     startedAt: "2026-07-17T07:00:00.000Z",
   };
+  let compactorProbes = 0;
   const staleContender = acquireOperationLock(
     acquisitionOptions(lockPath, {
       identity: staleIdentity,
-      readProcessIdentity: async () => null,
+      readProcessIdentity: async (pid) => {
+        if (pid !== CONTENDER.pid) return null;
+        compactorProbes += 1;
+        return compactorProbes === 1 ? CONTENDER : null;
+      },
       testHooks: {
         "after-publish-sync": async () => {
           contenderLinked.resolve();
@@ -1048,4 +1070,164 @@ test("release drains every commit accepted before release started", async (t) =>
   await second;
   assert.equal(await release, true);
   assert.deepEqual(order, ["first", "second", "release"]);
+});
+
+test("exclusive staging collisions never unlink a file this call did not create", async (t) => {
+  const { lockPath } = await fixture(t);
+  const sentinel = "foreign staging file\n";
+  let collisionPath;
+
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      testHooks: {
+        "before-staging-open": async ({ stagingPath: path }) => {
+          collisionPath = path;
+          await writeFile(path, sentinel, { mode: 0o600 });
+        },
+      },
+    })),
+    (error) => error.code === "LOCK_STAGING_WRITE_FAILED",
+  );
+  assert.equal(await readFile(collisionPath, "utf8"), sentinel);
+});
+
+test("startup conservatively collects strict dead checkpoint and release staging artifacts", async (t) => {
+  const { lockPath } = await fixture(t);
+  await mkdir(dirname(lockPath), { mode: 0o700 });
+  const dead = { pid: 91_001, startedAt: "2026-07-17T09:00:00.000Z" };
+  const live = { pid: 91_002, startedAt: "2026-07-17T09:01:00.000Z" };
+  const racing = { pid: 91_003, startedAt: "2026-07-17T09:01:30.000Z" };
+  const deadCheckpoint = `${lockPath}.checkpoint.${dead.pid}.dead-checkpoint`;
+  const liveCheckpoint = `${lockPath}.checkpoint.${live.pid}.live-checkpoint`;
+  const malformedCheckpoint = `${lockPath}.checkpoint.${dead.pid}.malformed`;
+  const racingCheckpoint = `${lockPath}.checkpoint.${racing.pid}.racing-checkpoint`;
+  await writePrivateJson(deadCheckpoint, ownerRecord({
+    identity: dead,
+    nonce: "dead-checkpoint",
+    predecessor: null,
+  }));
+  await writePrivateJson(liveCheckpoint, ownerRecord({
+    identity: live,
+    nonce: "live-checkpoint",
+    predecessor: null,
+  }));
+  await writeFile(malformedCheckpoint, "{bad", { mode: 0o600 });
+  await writePrivateJson(racingCheckpoint, ownerRecord({
+    identity: racing,
+    nonce: "racing-checkpoint",
+    predecessor: null,
+  }));
+
+  const releaseRecord = (identity, nonce) => ({
+    schemaVersion: 2,
+    nonce,
+    pid: identity.pid,
+    startedAt: identity.startedAt,
+    claim: { dev: "1", ino: "2" },
+    releasedAt: "2026-07-17T09:02:00.000Z",
+  });
+  const deadRelease = `${lockPath}.released.dead-release.staging.dead-producer`;
+  const liveRelease = `${lockPath}.released.live-release.staging.live-producer`;
+  const malformedRelease = `${lockPath}.released.malformed.staging.producer`;
+  await writePrivateJson(deadRelease, releaseRecord(dead, "dead-release"));
+  await writePrivateJson(liveRelease, releaseRecord(live, "live-release"));
+  await writeFile(malformedRelease, "{}\n", { mode: 0o600 });
+
+  let racingProbes = 0;
+  const lease = await acquireOperationLock(acquisitionOptions(lockPath, {
+    readProcessIdentity: async (pid) => {
+      if (pid === live.pid) return live;
+      if (pid === racing.pid) {
+        racingProbes += 1;
+        return racingProbes === 1 ? null : racing;
+      }
+      return null;
+    },
+  }));
+  t.after(() => lease.release());
+  assert.equal(await exists(deadCheckpoint), false);
+  assert.equal(await exists(deadRelease), false);
+  assert.equal(await exists(liveCheckpoint), true);
+  assert.equal(await exists(liveRelease), true);
+  assert.equal(await exists(malformedCheckpoint), true);
+  assert.equal(await exists(malformedRelease), true);
+  assert.equal(await exists(racingCheckpoint), true);
+});
+
+test("artifact cleanup never unlinks a replacement with a different inode", async (t) => {
+  const { lockPath } = await fixture(t);
+  const dead = { pid: 92_001, startedAt: "2026-07-17T10:00:00.000Z" };
+  const path = stagingPath(lockPath, dead, "dead-artifact");
+  await mkdir(dirname(lockPath), { mode: 0o700 });
+  await writePrivateJson(path, ownerRecord({
+    identity: dead,
+    nonce: "dead-artifact",
+  }));
+  const replacement = "replacement must survive\n";
+
+  await assert.rejects(
+    acquireOperationLock(acquisitionOptions(lockPath, {
+      testHooks: {
+        "before-artifact-tombstone": async ({ path: candidate }) => {
+          if (candidate !== path) return;
+          await unlink(path);
+          await writeFile(path, replacement, { mode: 0o600 });
+        },
+      },
+    })),
+    (error) => error.code === "LOCK_ARTIFACT_CHANGED",
+  );
+  assert.equal(await readFile(path, "utf8"), replacement);
+});
+
+test("hard-exit checkpoint crashes remain bounded across recovery loops", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const { lockPath } = await fixture(t);
+  const initial = await acquireOperationLock(acquisitionOptions(lockPath));
+  await initial.release();
+  const moduleUrl = new URL("../src/operation-lock.mjs", import.meta.url).href;
+
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    const childSource = `
+      const { acquireOperationLock } = await import(${JSON.stringify(moduleUrl)});
+      await acquireOperationLock({
+        lockPath: ${JSON.stringify(lockPath)},
+        stateRoot: ${JSON.stringify(dirname(lockPath))},
+        operation: "child-crash",
+        identity: { pid: process.pid, startedAt: "child-" + process.pid },
+        readProcessIdentity: async () => null,
+        compactionThreshold: 2,
+        testHooks: {
+          "before-compact-rename": async () => process.exit(73),
+        },
+      });
+      process.exit(0);
+    `;
+    const child = await runNodeChild(childSource);
+    assert.equal(child.signal, null, child.stderr);
+    assert.equal(child.code, 73, child.stderr);
+    assert.ok(
+      (await readdir(dirname(lockPath))).some((name) =>
+        name.startsWith(`${basename(lockPath)}.checkpoint.`)),
+    );
+
+    const recovery = await acquireOperationLock(acquisitionOptions(lockPath, {
+      compactionThreshold: 2,
+      readProcessIdentity: async () => null,
+    }));
+    await recovery.release();
+  }
+
+  const checkpointArtifacts = (await readdir(dirname(lockPath))).filter((name) =>
+    name.startsWith(`${basename(lockPath)}.checkpoint.`));
+  assert.deepEqual(checkpointArtifacts, []);
+  const allArtifacts = (await readdir(dirname(lockPath))).filter((name) =>
+    name.startsWith(basename(lockPath)));
+  assert.ok(allArtifacts.length <= 8, `found ${allArtifacts.length} lock artifacts`);
+  assert.equal(
+    (await readdir(dirname(lockPath))).some((name) =>
+      name.startsWith(".operation-lock-gc.")),
+    false,
+  );
 });

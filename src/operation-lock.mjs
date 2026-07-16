@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rename,
+  rmdir,
   unlink,
 } from "node:fs/promises";
 import {
@@ -436,8 +437,10 @@ async function unlinkIfPresent(path) {
 
 async function writeSyncedExclusiveFile(path, contents) {
   let handle;
+  let created = false;
   try {
     handle = await open(path, "wx", PRIVATE_FILE_MODE);
+    created = true;
     await handle.chmod(PRIVATE_FILE_MODE);
     await handle.writeFile(contents, "utf8");
     await handle.sync();
@@ -448,7 +451,7 @@ async function writeSyncedExclusiveFile(path, contents) {
     return { dev: metadata.dev, ino: metadata.ino };
   } catch (error) {
     await handle?.close().catch(() => {});
-    await unlinkIfPresent(path).catch(() => {});
+    if (created) await unlinkIfPresent(path).catch(() => {});
     if (error instanceof OperationLockError) throw error;
     throw lockError(
       "LOCK_STAGING_WRITE_FAILED",
@@ -515,6 +518,107 @@ function sameClaim(left, right) {
     left.metadata.dev === right.metadata.dev &&
     left.metadata.ino === right.metadata.ino
   );
+}
+
+function sameFileSnapshot(left, right) {
+  return (
+    left.raw === right.raw &&
+    left.metadata.dev === right.metadata.dev &&
+    left.metadata.ino === right.metadata.ino
+  );
+}
+
+async function createPrivateQuarantine(parentPath) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const path = join(
+      parentPath,
+      `.operation-lock-gc.${process.pid}.${createNonce()}`,
+    );
+    try {
+      await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });
+      const metadata = await lstat(path);
+      requirePrivateDirectory(metadata, `artifact quarantine ${path}`);
+      return path;
+    } catch (error) {
+      if (error.code === "EEXIST") continue;
+      throw lockError(
+        "LOCK_ARTIFACT_CLEANUP_FAILED",
+        `could not create a private artifact quarantine below ${parentPath}`,
+        error,
+      );
+    }
+  }
+  throw lockError(
+    "LOCK_ARTIFACT_CLEANUP_FAILED",
+    "could not allocate a unique artifact quarantine",
+  );
+}
+
+async function removeExactArtifact({
+  path,
+  snapshot,
+  options,
+  durability,
+  description,
+}) {
+  await runStage(options, "before-artifact-tombstone", { path, snapshot });
+  const parentPath = dirname(path);
+  const quarantineDirectory = await createPrivateQuarantine(parentPath);
+  const quarantinePath = join(quarantineDirectory, "artifact");
+  try {
+    try {
+      await rename(path, quarantinePath);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        await rmdir(quarantineDirectory).catch(() => {});
+        return false;
+      }
+      throw error;
+    }
+
+    const moved = await lstat(quarantinePath);
+    if (
+      moved.dev !== snapshot.metadata.dev ||
+      moved.ino !== snapshot.metadata.ino
+    ) {
+      let restoreError;
+      try {
+        await link(quarantinePath, path);
+        await durability.syncDirectory(parentPath);
+      } catch (error) {
+        restoreError = error;
+      }
+      throw lockError(
+        "LOCK_ARTIFACT_CHANGED",
+        `${description} changed inode before quarantine; preserved at ${quarantinePath}`,
+        restoreError,
+      );
+    }
+
+    await unlink(quarantinePath);
+    await rmdir(quarantineDirectory);
+    return true;
+  } catch (error) {
+    if (error instanceof OperationLockError) throw error;
+    throw lockError(
+      "LOCK_ARTIFACT_CLEANUP_FAILED",
+      `could not quarantine exact ${description} ${path}`,
+      error,
+    );
+  }
+}
+
+async function cleanupCreatedTemporary(path, metadata, durability) {
+  if (metadata === undefined) return false;
+  const removed = await removeExactArtifact({
+    path,
+    snapshot: { metadata },
+    options: {},
+    durability,
+    description: "owned temporary artifact",
+  });
+  if (removed) await durability.syncDirectory(dirname(path));
+  return removed;
 }
 
 async function readClaim(path, { allowMissing = false, predecessor = undefined } = {}) {
@@ -596,6 +700,38 @@ function validateReleaseRecord(value, claim) {
   ) {
     throw lockError(code, "release marker is not bound to its owner claim");
   }
+  validateTimestamp(value.releasedAt, "releasedAt", code);
+  return value;
+}
+
+function validateDetachedReleaseRecord(value, expectedNonce) {
+  const code = "LOCK_RELEASE_STAGING_MALFORMED";
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !exactKeys(value, [
+      "claim",
+      "nonce",
+      "pid",
+      "releasedAt",
+      "schemaVersion",
+      "startedAt",
+    ]) ||
+    value.schemaVersion !== LOCK_SCHEMA_VERSION ||
+    value.nonce !== expectedNonce ||
+    value.claim === null ||
+    typeof value.claim !== "object" ||
+    Array.isArray(value.claim) ||
+    !exactKeys(value.claim, ["dev", "ino"]) ||
+    typeof value.claim.dev !== "string" ||
+    value.claim.dev.length === 0 ||
+    typeof value.claim.ino !== "string" ||
+    value.claim.ino.length === 0
+  ) {
+    throw lockError(code, "release staging record has an invalid claim binding");
+  }
+  validateIdentity(value, code);
   validateTimestamp(value.releasedAt, "releasedAt", code);
   return value;
 }
@@ -691,6 +827,7 @@ async function cleanupProvenDeadStaging({
   parentPath,
   readProcessIdentity,
   durability,
+  options,
 }) {
   let entries;
   try {
@@ -723,14 +860,148 @@ async function cleanupProvenDeadStaging({
     const confirmed = await readStagingArtifact(path, expected);
     if (confirmed === null || !sameClaim(initial, confirmed)) continue;
     try {
-      changed = (await unlinkIfPresent(path)) || changed;
+      const rechecked = await probeOwner(confirmed.owner, readProcessIdentity);
+      if (processStillOwnsRecord(confirmed.owner, rechecked)) continue;
+    } catch {
+      continue;
+    }
+    try {
+      changed = (await removeExactArtifact({
+        path,
+        snapshot: confirmed,
+        options,
+        durability,
+        description: "proven-dead staging artifact",
+      })) || changed;
     } catch (error) {
+      if (error instanceof OperationLockError) throw error;
       throw lockError(
         "LOCK_ARTIFACT_CLEANUP_FAILED",
         `could not remove proven-dead staging artifact ${path}`,
         error,
       );
     }
+  }
+  if (changed) await durability.syncDirectory(parentPath);
+}
+
+function parseCheckpointArtifactName(lockPath, name) {
+  const prefix = `${basename(lockPath)}.checkpoint.`;
+  if (!name.startsWith(prefix)) return null;
+  const parts = name.slice(prefix.length).split(".");
+  if (parts.length !== 2 || !/^[1-9][0-9]*$/u.test(parts[0])) return null;
+  const pid = Number(parts[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !NONCE_PATTERN.test(parts[1])) {
+    return null;
+  }
+  return { kind: "checkpoint", nonce: parts[1], pid };
+}
+
+function parseReleaseStagingArtifactName(lockPath, name) {
+  const prefix = `${basename(lockPath)}.released.`;
+  if (!name.startsWith(prefix)) return null;
+  const remainder = name.slice(prefix.length);
+  const marker = ".staging.";
+  const markerIndex = remainder.indexOf(marker);
+  if (
+    markerIndex <= 0 ||
+    markerIndex !== remainder.lastIndexOf(marker)
+  ) {
+    return null;
+  }
+  const claimNonce = remainder.slice(0, markerIndex);
+  const producerNonce = remainder.slice(markerIndex + marker.length);
+  if (
+    !NONCE_PATTERN.test(claimNonce) ||
+    !NONCE_PATTERN.test(producerNonce)
+  ) {
+    return null;
+  }
+  return { claimNonce, kind: "release-staging", producerNonce };
+}
+
+async function readCrashArtifact(path, expected) {
+  try {
+    const record = await readJsonFile(path, {
+      allowMissing: true,
+      malformedCode: "LOCK_ARTIFACT_MALFORMED",
+      permissionsCode: "LOCK_ARTIFACT_PERMISSIONS",
+      description: `${expected.kind} artifact`,
+    });
+    if (record === null) return null;
+    if (expected.kind === "checkpoint") {
+      const owner = validateOwnerRecord(record.value, "LOCK_CHECKPOINT_MALFORMED");
+      if (
+        owner.pid !== expected.pid ||
+        owner.nonce !== expected.nonce ||
+        owner.predecessor !== null
+      ) {
+        return null;
+      }
+      return { ...record, identity: owner };
+    }
+    const release = validateDetachedReleaseRecord(
+      record.value,
+      expected.claimNonce,
+    );
+    return { ...record, identity: release };
+  } catch {
+    return null;
+  }
+}
+
+async function cleanupProvenDeadCrashArtifacts({
+  lockPath,
+  parentPath,
+  readProcessIdentity,
+  durability,
+  options,
+}) {
+  let entries;
+  try {
+    entries = await readdir(parentPath, { withFileTypes: true });
+  } catch (error) {
+    throw lockError(
+      "LOCK_ARTIFACT_SCAN_FAILED",
+      `could not scan crash artifacts in ${parentPath}`,
+      error,
+    );
+  }
+
+  let changed = false;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const expected =
+      parseCheckpointArtifactName(lockPath, entry.name) ??
+      parseReleaseStagingArtifactName(lockPath, entry.name);
+    if (expected === null) continue;
+    const path = join(parentPath, entry.name);
+    const initial = await readCrashArtifact(path, expected);
+    if (initial === null) continue;
+
+    let current;
+    try {
+      current = await probeOwner(initial.identity, readProcessIdentity);
+    } catch {
+      continue;
+    }
+    if (processStillOwnsRecord(initial.identity, current)) continue;
+
+    const confirmed = await readCrashArtifact(path, expected);
+    if (confirmed === null || !sameFileSnapshot(initial, confirmed)) continue;
+    try {
+      const rechecked = await probeOwner(confirmed.identity, readProcessIdentity);
+      if (processStillOwnsRecord(confirmed.identity, rechecked)) continue;
+    } catch {
+      continue;
+    }
+    changed = (await removeExactArtifact({
+      path,
+      snapshot: confirmed,
+      options,
+      durability,
+      description: `proven-dead ${expected.kind} artifact`,
+    })) || changed;
   }
   if (changed) await durability.syncDirectory(parentPath);
 }
@@ -850,6 +1121,7 @@ async function cleanupProvenOrphanHeartbeats({
   parentPath,
   readProcessIdentity,
   durability,
+  options,
 }) {
   let entries;
   try {
@@ -888,8 +1160,15 @@ async function cleanupProvenOrphanHeartbeats({
       continue;
     }
     try {
-      changed = (await unlinkIfPresent(path)) || changed;
+      changed = (await removeExactArtifact({
+        path,
+        snapshot: confirmed,
+        options,
+        durability,
+        description: "proven-orphan heartbeat artifact",
+      })) || changed;
     } catch (error) {
+      if (error instanceof OperationLockError) throw error;
       throw lockError(
         "LOCK_ARTIFACT_CLEANUP_FAILED",
         `could not remove proven-orphan heartbeat artifact ${path}`,
@@ -954,24 +1233,35 @@ async function publishBoundRecord({
   stagingPath,
   durability,
 }) {
-  const metadata = await writeSyncedExclusiveFile(
-    stagingPath,
-    serializeJson(record),
-  );
+  let metadata;
   try {
-    await link(stagingPath, finalPath);
-  } catch (error) {
-    if (error.code === "EEXIST") {
-      return { existing: true, metadata };
+    try {
+      metadata = await writeSyncedExclusiveFile(
+        stagingPath,
+        serializeJson(record),
+      );
+      await link(stagingPath, finalPath);
+    } catch (error) {
+      if (error.code === "EEXIST") {
+        return { existing: true, metadata };
+      }
+      throw lockError(
+        "LOCK_PUBLISH_FAILED",
+        `could not atomically publish ${finalPath} with a same-filesystem hard link`,
+        error,
+      );
     }
-    throw lockError(
-      "LOCK_PUBLISH_FAILED",
-      `could not atomically publish ${finalPath} with a same-filesystem hard link`,
-      error,
-    );
+    await durability.syncDirectory(dirname(finalPath));
+    return { existing: false, metadata };
+  } finally {
+    if (metadata !== undefined) {
+      await cleanupCreatedTemporary(
+        stagingPath,
+        metadata,
+        durability,
+      ).catch(() => false);
+    }
   }
-  await durability.syncDirectory(dirname(finalPath));
-  return { existing: false, metadata };
 }
 
 async function publishReleaseMarker({
@@ -986,27 +1276,23 @@ async function publishReleaseMarker({
   const finalPath = releasePath(lockPath, claim.owner.nonce);
   const stagingPath = `${finalPath}.staging.${createNonce()}`;
   const value = releaseRecord(claim, timestampFrom(now));
-  try {
-    const publication = await publishBoundRecord({
-      finalPath,
-      record: value,
-      stagingPath,
-      durability,
-    });
-    if (publication.existing) {
-      const existing = await readReleaseMarker(lockPath, claim);
-      if (existing === null) {
-        throw lockError(
-          "LOCK_RELEASE_FAILED",
-          "release marker disappeared during idempotent release",
-        );
-      }
-      return false;
+  const publication = await publishBoundRecord({
+    finalPath,
+    record: value,
+    stagingPath,
+    durability,
+  });
+  if (publication.existing) {
+    const existing = await readReleaseMarker(lockPath, claim);
+    if (existing === null) {
+      throw lockError(
+        "LOCK_RELEASE_FAILED",
+        "release marker disappeared during idempotent release",
+      );
     }
-    return true;
-  } finally {
-    await unlinkIfPresent(stagingPath).catch(() => {});
+    return false;
   }
+  return true;
 }
 
 async function assertClaimOwned(lockPath, expected) {
@@ -1054,8 +1340,9 @@ async function writeHeartbeat({ lockPath, claim, heartbeat, durability }) {
   const finalPath = heartbeatFilePath(lockPath, claim.owner.nonce);
   const temporaryPath = `${finalPath}.tmp.${createNonce()}`;
   let renamed = false;
+  let temporaryMetadata;
   try {
-    await writeSyncedExclusiveFile(
+    temporaryMetadata = await writeSyncedExclusiveFile(
       temporaryPath,
       serializeJson(heartbeatRecord(claim, heartbeat)),
     );
@@ -1072,7 +1359,13 @@ async function writeHeartbeat({ lockPath, claim, heartbeat, durability }) {
       error,
     );
   } finally {
-    if (!renamed) await unlinkIfPresent(temporaryPath).catch(() => {});
+    if (!renamed && temporaryMetadata !== undefined) {
+      await cleanupCreatedTemporary(
+        temporaryPath,
+        temporaryMetadata,
+        durability,
+      ).catch(() => false);
+    }
   }
   return finalPath;
 }
@@ -1337,8 +1630,9 @@ async function compactOwnershipChain({
   const raw = serializeJson(checkpointOwner);
   let renamed = false;
   let checkpointClaim;
+  let stagingMetadata;
   try {
-    const stagingMetadata = await writeSyncedExclusiveFile(stagingPath, raw);
+    stagingMetadata = await writeSyncedExclusiveFile(stagingPath, raw);
     await runStage(options, "before-compact-rename", { chain });
     await assertClaimOwned(lockPath, chain.tail);
     await runStage(options, "after-compact-final-check", { chain });
@@ -1403,7 +1697,13 @@ async function compactOwnershipChain({
     }
     throw new HandledAcquireFailure(error);
   } finally {
-    if (!renamed) await unlinkIfPresent(stagingPath).catch(() => {});
+    if (!renamed && stagingMetadata !== undefined) {
+      await cleanupCreatedTemporary(
+        stagingPath,
+        stagingMetadata,
+        durability,
+      ).catch(() => false);
+    }
   }
 }
 
@@ -1446,12 +1746,21 @@ export async function acquireOperationLock(options) {
     parentPath,
     readProcessIdentity,
     durability,
+    options,
+  });
+  await cleanupProvenDeadCrashArtifacts({
+    lockPath,
+    parentPath,
+    readProcessIdentity,
+    durability,
+    options,
   });
   await cleanupProvenOrphanHeartbeats({
     lockPath,
     parentPath,
     readProcessIdentity,
     durability,
+    options,
   });
 
   for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
@@ -1497,9 +1806,11 @@ export async function acquireOperationLock(options) {
     const raw = serializeJson(owner);
     let published = false;
     let keepStaging = false;
+    let stagingMetadata;
     let claim;
     try {
-      const stagingMetadata = await writeSyncedExclusiveFile(stagingPath, raw);
+      await runStage(options, "before-staging-open", { owner, stagingPath });
+      stagingMetadata = await writeSyncedExclusiveFile(stagingPath, raw);
       try {
         if (options.faultAt === "before-publish") keepStaging = true;
         await runStage(options, "before-publish", { owner, stagingPath });
@@ -1507,8 +1818,12 @@ export async function acquireOperationLock(options) {
           await link(stagingPath, finalPath);
         } catch (error) {
           if (error.code === "EEXIST") {
-            await unlinkIfPresent(stagingPath);
-            await durability.syncDirectory(parentPath);
+            await cleanupCreatedTemporary(
+              stagingPath,
+              stagingMetadata,
+              durability,
+            );
+            stagingMetadata = undefined;
             continue;
           }
           throw lockError(
@@ -1528,8 +1843,8 @@ export async function acquireOperationLock(options) {
           predecessor,
         );
         await runStage(options, "after-publish", { claim });
-        await unlinkIfPresent(stagingPath);
-        await durability.syncDirectory(parentPath);
+        await cleanupCreatedTemporary(stagingPath, stagingMetadata, durability);
+        stagingMetadata = undefined;
         await runStage(options, "after-publish-sync", { claim });
 
         const confirmed = await readClaim(finalPath, { predecessor });
@@ -1596,7 +1911,13 @@ export async function acquireOperationLock(options) {
         throw error;
       }
     } finally {
-      if (!keepStaging) await unlinkIfPresent(stagingPath).catch(() => {});
+      if (stagingMetadata !== undefined && !keepStaging) {
+        await cleanupCreatedTemporary(
+          stagingPath,
+          stagingMetadata,
+          durability,
+        ).catch(() => false);
+      }
     }
   }
 
