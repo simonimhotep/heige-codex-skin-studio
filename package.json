@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "bin": {
     "heige-codex-skin": "src/cli.mjs"
   },
@@ -14,6 +17,7 @@
     "apply": "node src/cli.mjs apply"
   },
   "devDependencies": {
-    "happy-dom": "20.10.6"
+    "happy-dom": "20.10.6",
+    "yazl": "3.3.1"
   }
 }

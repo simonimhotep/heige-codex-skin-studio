@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "source": "skill/heige-codex-skin-studio/SKILL.md",
+      "destination": "SKILL.md",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "skill/heige-codex-skin-studio/README.md",
+      "destination": "README.md",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "skill/heige-codex-skin-studio/scripts",
+      "destination": "scripts",
+      "recursive": true,
+      "exclude": []
+    },
+    {
+      "source": "src",
+      "destination": "payload/src",
+      "recursive": true,
+      "exclude": []
+    },
+    {
+      "source": "themes",
+      "destination": "payload/themes",
+      "recursive": true,
+      "exclude": []
+    },
+    {
+      "source": "custom-pet",
+      "destination": "payload/custom-pet",
+      "recursive": true,
+      "exclude": []
+    },
+    {
+      "source": "scripts",
+      "destination": "payload/scripts",
+      "recursive": true,
+      "exclude": [
+        "check-asset-provenance.mjs",
+        "package-skill.command",
+        "package-skill.mjs",
+        "skill-package-manifest.json"
+      ]
+    },
+    {
+      "source": "LICENSE",
+      "destination": "LICENSE",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "NOTICE.md",
+      "destination": "NOTICE",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "SECURITY.md",
+      "destination": "SECURITY.md",
+      "recursive": false,
+      "exclude": []
+    },
+    {
+      "source": "ASSET_PROVENANCE.md",
+      "destination": "ASSET_PROVENANCE.md",
+      "recursive": false,
+      "exclude": []
+    }
+  ]
+}
