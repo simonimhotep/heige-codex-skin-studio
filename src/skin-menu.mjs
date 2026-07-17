@@ -5,6 +5,12 @@ const DEFAULT_ACCENT = "#24c9d7";
 const CONTROL_ENDPOINT = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/v1\/persistence$/;
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
+export function previewFromGeneratedCss(css) {
+  if (typeof css !== "string" || css.length === 0) return null;
+  const match = /url\("(data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+)"\)/.exec(css);
+  return match?.[1] ?? null;
+}
+
 // 客户端 CSS 由 Node 端模板加哨兵生成，替换后与内置主题同源，避免两套模板漂移
 export const CSS_SENTINELS = {
   id: "heige-custom-sentinel-id",
@@ -72,12 +78,20 @@ export function buildSkinMenuScript({
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new Error("皮肤菜单至少需要一个主题");
   }
+  const colorValue = (value, fallback) => HEX_COLOR.test(value ?? "") ? value : fallback;
   const themes = entries.map((entry) => {
     if (!entry?.id || typeof entry.css !== "string") throw new Error("主题条目缺少 id 或 css");
+    const accent = colorValue(entry.colors?.accent ?? entry.accent, DEFAULT_ACCENT);
     return {
       id: String(entry.id),
       name: typeof entry.name === "string" && entry.name.trim() ? entry.name : String(entry.id),
-      accent: HEX_COLOR.test(entry.accent ?? "") ? entry.accent : DEFAULT_ACCENT,
+      accent,
+      colors: {
+        accent,
+        secondary: colorValue(entry.colors?.secondary, "#ed6ec1"),
+        surface: colorValue(entry.colors?.surface, "#f5f6fc"),
+        text: colorValue(entry.colors?.text, "#17344f"),
+      },
       css: entry.css,
     };
   });
@@ -100,10 +114,12 @@ export function buildSkinMenuScript({
     control: normalizeControl(control),
     limits: RESOURCE_LIMITS,
   });
+  const previewParserSource = previewFromGeneratedCss.toString();
 
   return `(() => {
   try { window.__heigeCodexSkinRuntime?.dispose?.(); } catch {}
   const data = ${payload};
+  const previewFromGeneratedCss = ${previewParserSource};
 
   const runtimeAbortController = new AbortController();
   const signal = runtimeAbortController.signal;

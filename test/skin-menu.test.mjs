@@ -1,12 +1,48 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSkinMenuScript, CSS_SENTINELS } from "../src/skin-menu.mjs";
+import {
+  buildSkinMenuScript,
+  CSS_SENTINELS,
+  previewFromGeneratedCss,
+} from "../src/skin-menu.mjs";
 
 const base = {
   styleId: "heige-codex-skin-style",
   menuId: "heige-codex-skin-menu",
 };
+
+test("extracts one validated hero data URL from generated theme CSS", () => {
+  const hero = "data:image/webp;base64,QUJDRA==";
+  const css = `#root { background:
+    linear-gradient(#fff, transparent),
+    url(${JSON.stringify(hero)}) right center / cover no-repeat fixed !important;
+  }`;
+  assert.equal(previewFromGeneratedCss(css), hero);
+  assert.equal(previewFromGeneratedCss("html { color: red; }"), null);
+  assert.equal(previewFromGeneratedCss("#root{background:url(https://example.com/x.webp)}"), null);
+});
+
+test("embeds validated theme colors without adding a duplicate preview field", () => {
+  const script = buildSkinMenuScript({
+    ...base,
+    activeId: "miku-488137",
+    entries: [{
+      id: "miku-488137",
+      name: "Miku",
+      accent: "#19c9e5",
+      colors: {
+        accent: "#19c9e5",
+        secondary: "#ed6ec1",
+        surface: "#f5f6fc",
+        text: "#122c60",
+      },
+      css: `#root{background:url("data:image/webp;base64,QUJDRA==")}`,
+    }],
+  });
+  assert.match(script, /"secondary":"#ed6ec1"/);
+  assert.doesNotMatch(script, /"preview":/);
+});
 
 test("embeds every theme and the active id as JSON data", () => {
   const script = buildSkinMenuScript({
