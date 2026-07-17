@@ -115,6 +115,15 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
 [data-app-action-sidebar-thread-active="true"] {
   background: linear-gradient(90deg, color-mix(in srgb, var(--heige-accent) 22%, transparent), color-mix(in srgb, var(--heige-secondary) 16%, transparent)) !important;
 }
+
+/* 非当前任务不常驻展示共享工作区的 PR 状态，悬停时仍可检查 */
+[data-app-action-sidebar-thread-active="false"] span:has(svg[class*="pr-status-dot-color"]) {
+  opacity: 0 !important;
+}
+
+[data-app-action-sidebar-thread-active="false"]:hover span:has(svg[class*="pr-status-dot-color"]) {
+  opacity: 1 !important;
+}
 ${logoDataUrl === null ? "" : `
 /* 侧栏工作区标题换品牌 Logo，按钮仍可点开模式切换 */
 .app-shell-left-panel button[aria-haspopup="menu"][aria-label*="ChatGPT"] {
