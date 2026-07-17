@@ -4,6 +4,11 @@ import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  isolatedWindowsPowerShellEnvironment,
+  trustedWindowsPowerShellPath,
+} from "./windows-secure-fs.mjs";
+
 const execFileAsync = promisify(execFile);
 
 // Codex Desktop 各平台安装位点。Windows 覆盖 electron-builder 常见目录，
@@ -164,6 +169,7 @@ export async function runtimeDiagnostics({
   appPath = "/Applications/ChatGPT.app",
   port = 9341,
   exec = execFileAsync,
+  env = process.env,
   fetchImpl = globalThis.fetch,
 } = {}) {
   const result = {
@@ -194,11 +200,13 @@ export async function runtimeDiagnostics({
 
   if (platform === "win32") {
     try {
-      const { stdout } = await exec("powershell", [
+      const { stdout } = await exec(trustedWindowsPowerShellPath(env), [
         "-NoProfile",
         "-Command",
         "Get-CimInstance Win32_Process -Filter \"Name='ChatGPT.exe' or Name='Codex.exe'\" | Select-Object -ExpandProperty CommandLine",
-      ]);
+      ], {
+        env: isolatedWindowsPowerShellEnvironment(env),
+      });
       const lines = stdout.split(/\r?\n/).filter((line) => line.trim());
       result.processRunning = lines.length > 0;
       result.processHasDebugFlag = lines.some((line) => line.includes("--remote-debugging-port"));

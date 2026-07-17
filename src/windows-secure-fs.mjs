@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
+Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 $isDirectory = $Action.EndsWith('-directory', [System.StringComparison]::Ordinal)
 $protect = $Action.StartsWith('protect-', [System.StringComparison]::Ordinal) -or $Action.StartsWith('migrate-', [System.StringComparison]::Ordinal)
 $migrate = $Action.StartsWith('migrate-', [System.StringComparison]::Ordinal)
@@ -22,7 +23,7 @@ if ($isDirectory -ne [bool]$item.PSIsContainer) {
 }
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 if ($migrate) {
-  $beforeAcl = Get-Acl -LiteralPath $TargetPath -ErrorAction Stop
+  $beforeAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $TargetPath -ErrorAction Stop
   try {
     $beforeOwnerSid = ([System.Security.Principal.NTAccount]$beforeAcl.Owner).Translate([System.Security.Principal.SecurityIdentifier])
   } catch {
@@ -79,9 +80,9 @@ if ($protect) {
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($currentSid, $rights, $allow)
   }
   $acl.AddAccessRule($rule) | Out-Null
-  Set-Acl -LiteralPath $TargetPath -AclObject $acl -ErrorAction Stop
+  Microsoft.PowerShell.Security\Set-Acl -LiteralPath $TargetPath -AclObject $acl -ErrorAction Stop
 }
-$observed = Get-Acl -LiteralPath $TargetPath -ErrorAction Stop
+$observed = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $TargetPath -ErrorAction Stop
 try {
   $ownerSid = ([System.Security.Principal.NTAccount]$observed.Owner).Translate([System.Security.Principal.SecurityIdentifier])
 } catch {
@@ -131,6 +132,15 @@ export function trustedWindowsPowerShellPath(env = process.env) {
   return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
+export function isolatedWindowsPowerShellEnvironment(env = process.env) {
+  if (env === null || typeof env !== "object" || Array.isArray(env)) {
+    throw new TypeError("Windows PowerShell environment must be an object");
+  }
+  return Object.freeze(Object.fromEntries(
+    Object.entries(env).filter(([key]) => key.toLowerCase() !== "psmodulepath"),
+  ));
+}
+
 function exactAclResult(value, { action, path }) {
   const expectedKeys = ["action", "ownerSid", "path", "private", "schemaVersion"];
   const mismatches = [];
@@ -156,9 +166,11 @@ function exactAclResult(value, { action, path }) {
 
 export function createWindowsSecurityAdapter({
   execFileImpl = execFile,
-  powershellPath = trustedWindowsPowerShellPath(),
+  env = process.env,
+  powershellPath = trustedWindowsPowerShellPath(env),
 } = {}) {
   canonicalWindowsPath(powershellPath, "trusted Windows PowerShell path");
+  const childEnv = isolatedWindowsPowerShellEnvironment(env);
   const run = async (action, path) => {
     canonicalWindowsPath(path, "Windows private path");
     const { stdout, stderr = "" } = await execFileImpl(powershellPath, [
@@ -170,6 +182,7 @@ export function createWindowsSecurityAdapter({
       action,
       path,
     ], {
+      env: childEnv,
       timeout: 15_000,
       maxBuffer: 256 * 1024,
       windowsHide: true,

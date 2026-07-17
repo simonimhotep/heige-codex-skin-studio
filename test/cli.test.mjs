@@ -2106,13 +2106,18 @@ test("ephemeral controller lease reuses one exact live singleton and recovers af
 
 test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner, never lsof", async () => {
   const calls = [];
+  const env = {
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules",
+  };
   const identity = {
     pid: 4242,
     executablePath: "C:\\Program Files\\Codex\\Codex.exe",
     startedAt: "2026-07-17T08:00:00.0000000Z",
   };
-  const execFileImpl = async (file, args) => {
-    calls.push([file, ...args]);
+  const execFileImpl = async (file, args, options) => {
+    calls.push({ command: [file, ...args], options });
     return {
       stdout: JSON.stringify([{
         ...identity,
@@ -2124,15 +2129,21 @@ test("Windows CDP probe and validation use one exact Get-NetTCPConnection owner,
   };
   assert.deepEqual(await probeWindowsCdpProcess(9341, {
     execFileImpl,
+    env,
     powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   }), identity);
   assert.equal(await validatePortOwner(9341, identity, {
     platform: "win32",
     execFileImpl,
+    env,
     powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   }), true);
-  assert.equal(calls.every((entry) => !entry.includes("/usr/sbin/lsof")), true);
-  assert.equal(calls.every((entry) => entry.join(" ").includes("Get-NetTCPConnection")), true);
+  assert.equal(calls.every((entry) => !entry.command.includes("/usr/sbin/lsof")), true);
+  assert.equal(calls.every((entry) => entry.command.join(" ").includes("Get-NetTCPConnection")), true);
+  assert.equal(calls.every((entry) => (
+    Object.keys(entry.options.env).every((key) => key.toLowerCase() !== "psmodulepath")
+  )), true);
+  assert.equal(env.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules");
 });
 
 test("production preflight binds the Windows platform to the trusted runtime snapshot route", async () => {

@@ -3,6 +3,8 @@ import { lstat, open } from "node:fs/promises";
 import { win32 } from "node:path";
 import { promisify } from "node:util";
 
+import { isolatedWindowsPowerShellEnvironment } from "./windows-secure-fs.mjs";
+
 const execFile = promisify(execFileCallback);
 const PROCESS_STARTED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,7}Z$/;
 const PROCESS_NAMES = new Set(["chatgpt", "codex"]);
@@ -386,6 +388,7 @@ export async function queryWindowsRuntimeSnapshot({
     String(port),
     identityToken ?? "",
   ], {
+    env: isolatedWindowsPowerShellEnvironment(env),
     timeout: 15_000,
     maxBuffer: 256 * 1024,
     windowsHide: true,

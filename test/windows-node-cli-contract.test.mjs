@@ -14,7 +14,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createWindowsSecurityAdapter } from "../src/windows-secure-fs.mjs";
+import {
+  createWindowsSecurityAdapter,
+  isolatedWindowsPowerShellEnvironment,
+} from "../src/windows-secure-fs.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -274,7 +277,11 @@ test("real Windows Node CLI stays isolated, portable, and crash-safe", {
         String(PORT),
         "-StateDirectory",
         stateRoot,
-      ], { timeout: CLEANUP_TIMEOUT_MS, windowsHide: true });
+      ], {
+        env: isolatedWindowsPowerShellEnvironment(),
+        timeout: CLEANUP_TIMEOUT_MS,
+        windowsHide: true,
+      });
     } finally {
       await rm(stateRoot, { recursive: true, force: true });
     }

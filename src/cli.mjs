@@ -80,7 +80,10 @@ import {
   queryWindowsRuntimeSnapshot,
   validateWindowsRuntimeSnapshot,
 } from "./windows-runtime.mjs";
-import { trustedWindowsPowerShellPath } from "./windows-secure-fs.mjs";
+import {
+  isolatedWindowsPowerShellEnvironment,
+  trustedWindowsPowerShellPath,
+} from "./windows-secure-fs.mjs";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -302,6 +305,7 @@ export async function readProcessIdentity(pid, platform = process.platform) {
           `pid = [int]$p.Id; startedAt = $p.StartTime.ToUniversalTime().ToString('o') }; ` +
           `[Console]::Out.Write((ConvertTo-Json -InputObject $result -Compress)) }`,
       ], {
+        env: isolatedWindowsPowerShellEnvironment(),
         timeout: 15_000,
         maxBuffer: 256 * 1024,
         windowsHide: true,
@@ -381,7 +385,8 @@ const WINDOWS_CODEX_PROCESS_NAMES = new Set(["chatgpt", "codex"]);
 
 export async function probeWindowsCdpProcess(port, {
   execFileImpl = execFile,
-  powershellPath = windowsPowerShellPath(),
+  env = process.env,
+  powershellPath = windowsPowerShellPath(env),
 } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("Windows CDP port is invalid");
@@ -407,7 +412,9 @@ export async function probeWindowsCdpProcess(port, {
     "-NonInteractive",
     "-Command",
     script,
-  ]);
+  ], {
+    env: isolatedWindowsPowerShellEnvironment(env),
+  });
   let records;
   try {
     records = JSON.parse(String(stdout).trim());
@@ -471,12 +478,14 @@ export async function probeWindowsCdpProcess(port, {
 export async function validatePortOwner(port, processIdentity, {
   platform = process.platform,
   execFileImpl = execFile,
+  env = process.env,
   powershellPath,
 } = {}) {
   if (platform === "win32") {
     try {
       const observed = await probeWindowsCdpProcess(port, {
         execFileImpl,
+        env,
         ...(powershellPath === undefined ? {} : { powershellPath }),
       });
       return sameProcessIdentity(observed, processIdentity);
@@ -898,8 +907,8 @@ export function controllerInjectionPreference({ ephemeral = false, preferStored 
   return preferStored ?? !ephemeral;
 }
 
-function windowsPowerShellPath() {
-  return trustedWindowsPowerShellPath();
+function windowsPowerShellPath(env = process.env) {
+  return trustedWindowsPowerShellPath(env);
 }
 
 async function runWindowsControllerAction({
@@ -934,7 +943,9 @@ async function runWindowsControllerAction({
       transitionNonce,
     );
   }
-  const { stdout } = await execFile(windowsPowerShellPath(), args);
+  const { stdout } = await execFile(windowsPowerShellPath(), args, {
+    env: isolatedWindowsPowerShellEnvironment(),
+  });
   const text = stdout.trim();
   if (text.length === 0) return {};
   try {

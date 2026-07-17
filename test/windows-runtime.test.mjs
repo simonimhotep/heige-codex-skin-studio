@@ -72,10 +72,16 @@ function appIdentityToken(app = APP) {
 test("Windows runtime query uses one trusted PowerShell command and accepts only strict JSON", async () => {
   const calls = [];
   const expected = snapshot();
+  const env = {
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules",
+  };
   const result = await queryWindowsRuntimeSnapshot({
     port: 9341,
     powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     commonScriptPath: "C:\\repo\\scripts\\windows\\lib\\common.ps1",
+    env,
     execFileImpl: async (file, args, options) => {
       calls.push({ file, args, options });
       return { stdout: `${JSON.stringify(expected)}\r\n`, stderr: "" };
@@ -87,10 +93,15 @@ test("Windows runtime query uses one trusted PowerShell command and accepts only
   assert.equal(calls[0].args.includes("C:\\repo\\scripts\\windows\\lib\\common.ps1"), true);
   assert.equal(calls[0].args.includes("9341"), true);
   assert.deepEqual(calls[0].options, {
+    env: {
+      SystemRoot: "C:\\Windows",
+      PATH: "C:\\Windows\\System32",
+    },
     timeout: 15_000,
     maxBuffer: 256 * 1024,
     windowsHide: true,
   });
+  assert.equal(env.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules");
 
   await assert.rejects(queryWindowsRuntimeSnapshot({
     port: 9341,
@@ -219,6 +230,48 @@ test("Windows ACL adapter protects files explicitly and bounds trusted PowerShel
   assert.equal(calls.every((entry) => entry.options.timeout === 15_000), true);
   assert.equal(calls.every((entry) => entry.options.maxBuffer === 256 * 1024), true);
   assert.equal(calls.every((entry) => entry.options.windowsHide === true), true);
+});
+
+test("Windows ACL adapter isolates Windows PowerShell modules from the parent runtime", async () => {
+  const calls = [];
+  const path = "C:\\Users\\Alice\\AppData\\Roaming\\HeiGeCodexSkinStudio";
+  const adapter = createWindowsSecurityAdapter({
+    powershellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    env: {
+      SystemRoot: "C:\\Windows",
+      PATH: "C:\\Windows\\System32",
+      PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules",
+      psMODULEpath: "C:\\Users\\Alice\\Documents\\PowerShell\\Modules",
+    },
+    execFileImpl: async (file, args, options) => {
+      calls.push({ file, args, options });
+      return {
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          action: args.at(-2),
+          path: args.at(-1),
+          ownerSid: "S-1-5-21-1",
+          private: true,
+        }),
+        stderr: "",
+      };
+    },
+  });
+
+  await adapter.verifyDirectory(path);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.env.SystemRoot, "C:\\Windows");
+  assert.equal(calls[0].options.env.PATH, "C:\\Windows\\System32");
+  assert.equal(
+    Object.keys(calls[0].options.env).some((key) => key.toLowerCase() === "psmodulepath"),
+    false,
+  );
+  assert.match(
+    windowsAclPowerShellScript,
+    /Import-Module[^\n]+\$PSHOME[^\n]+Microsoft\.PowerShell\.Security/,
+  );
+  assert.match(windowsAclPowerShellScript, /Microsoft\.PowerShell\.Security\\Get-Acl/);
+  assert.match(windowsAclPowerShellScript, /Microsoft\.PowerShell\.Security\\Set-Acl/);
 });
 
 test("Windows ACL adapter preserves the canonical request path instead of rewriting 8.3 aliases", async () => {

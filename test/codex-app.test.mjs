@@ -292,14 +292,23 @@ test("runtime diagnostics degrades honestly when probes fail", async () => {
 });
 
 test("runtime diagnostics reads windows process command lines via powershell", async () => {
-  const exec = async (bin, args) => {
-    assert.equal(bin, "powershell");
+  const env = {
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules",
+  };
+  const exec = async (bin, args, options) => {
+    assert.equal(bin, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     assert.ok(args.join(" ").includes("Win32_Process"));
+    assert.deepEqual(options.env, {
+      SystemRoot: "C:\\Windows",
+      PATH: "C:\\Windows\\System32",
+    });
     return { stdout: "C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT\\ChatGPT.exe --remote-debugging-port=9341\r\n" };
   };
   const fetchImpl = async () => { throw new Error("refused"); };
 
-  const diag = await runtimeDiagnostics({ platform: "win32", exec, fetchImpl });
+  const diag = await runtimeDiagnostics({ platform: "win32", exec, env, fetchImpl });
   assert.equal(diag.processRunning, true);
   assert.equal(diag.processHasDebugFlag, true);
   assert.equal(diag.portOpen, false);

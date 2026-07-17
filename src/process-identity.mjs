@@ -1,13 +1,22 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 
+import {
+  isolatedWindowsPowerShellEnvironment,
+  trustedWindowsPowerShellPath,
+} from "./windows-secure-fs.mjs";
+
 const execFile = promisify(execFileCallback);
 
 function validPid(pid) {
   return Number.isSafeInteger(pid) && pid > 0;
 }
 
-export async function readProcessIdentity(pid, { platform = process.platform } = {}) {
+export async function readProcessIdentity(pid, {
+  platform = process.platform,
+  env = process.env,
+  execFileImpl = execFile,
+} = {}) {
   if (!validPid(pid)) throw new TypeError("process identity pid must be positive");
   if (platform === "win32") {
     const script = [
@@ -17,9 +26,13 @@ export async function readProcessIdentity(pid, { platform = process.platform } =
       "[Console]::Out.Write(($o|ConvertTo-Json -Compress))",
     ].join(";");
     try {
-      const { stdout } = await execFile("powershell.exe", [
+      const { stdout } = await execFileImpl(trustedWindowsPowerShellPath(env), [
         "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
-      ], { timeout: 5_000, maxBuffer: 16 * 1024 });
+      ], {
+        env: isolatedWindowsPowerShellEnvironment(env),
+        timeout: 5_000,
+        maxBuffer: 16 * 1024,
+      });
       const value = JSON.parse(stdout);
       return value?.pid === pid && typeof value.startedAt === "string" && value.startedAt.length > 0
         ? { pid, startedAt: value.startedAt }
@@ -30,7 +43,7 @@ export async function readProcessIdentity(pid, { platform = process.platform } =
     }
   }
   try {
-    const { stdout } = await execFile("/bin/ps", ["-p", String(pid), "-o", "pid=,lstart="], {
+    const { stdout } = await execFileImpl("/bin/ps", ["-p", String(pid), "-o", "pid=,lstart="], {
       timeout: 5_000,
       maxBuffer: 16 * 1024,
     });
