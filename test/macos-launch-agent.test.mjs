@@ -1400,6 +1400,92 @@ test("self-unregister removes persistence only after a distinct one-shot helper 
   );
 });
 
+test("self-unregister pins its parent-created readiness inode through helper cleanup", async (t) => {
+  const currentPid = 4321;
+  const events = [];
+  const movedPaths = new Map();
+  let readyPath = null;
+  let readinessHandleClosed = false;
+  const deps = await fixture(t, {
+    currentPid,
+    printPid: (label) => label.includes(".unregister.") ? 8765 : currentPid,
+    onSubmit: async ({ args }) => {
+      readyPath = args.at(-2);
+      assert.equal(readinessHandleClosed, false);
+    },
+  });
+  deps.loaded.clear();
+  await registerControllerAgent(deps);
+  const originalOpen = deps.fs.open.bind(deps.fs);
+  const originalRename = deps.fs.rename.bind(deps.fs);
+  const originalRm = deps.fs.rm.bind(deps.fs);
+  const readinessKind = (path) => {
+    if (readyPath !== null && path === readyPath) return "public";
+    if (readyPath !== null && path === `${readyPath}.pending`) return "pending";
+    return movedPaths.get(path) ?? null;
+  };
+  deps.fs = {
+    ...deps.fs,
+    async open(path, flags, ...args) {
+      const handle = await originalOpen(path, flags, ...args);
+      if (
+        flags !== "wx" ||
+        !String(path).includes(".controller-unregister-helper-ready.") ||
+        !String(path).includes(".tmp.")
+      ) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "close") {
+            return async () => {
+              await target.close();
+              readinessHandleClosed = true;
+              events.push("handle:close");
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    async rename(from, to, ...args) {
+      const source = String(from);
+      const target = String(to);
+      const kind = readinessKind(source);
+      const result = await originalRename(from, to, ...args);
+      if (kind !== null) {
+        assert.equal(readinessHandleClosed, false);
+        events.push(`${kind}:rename`);
+        movedPaths.delete(source);
+        movedPaths.set(target, kind);
+      }
+      return result;
+    },
+    async rm(path, ...args) {
+      const selected = String(path);
+      const kind = readinessKind(selected);
+      const result = await originalRm(path, ...args);
+      if (kind !== null) {
+        assert.equal(readinessHandleClosed, false);
+        events.push(`${kind}:delete`);
+        movedPaths.delete(selected);
+      }
+      return result;
+    },
+  };
+
+  const result = await unregisterControllerAgent(deps);
+  assert.equal(result.deferred, true);
+  assert.equal(readinessHandleClosed, true);
+  assert.equal(events.includes("public:delete"), true);
+  assert.equal(events.includes("pending:delete"), true);
+  const closeIndex = events.lastIndexOf("handle:close");
+  const lastMutation = Math.max(
+    events.lastIndexOf("public:delete"),
+    events.lastIndexOf("pending:delete"),
+  );
+  assert.equal(closeIndex > lastMutation, true);
+});
+
 test("self-unregister never removes the canonical plist when the helper cannot be submitted", async (t) => {
   const currentPid = 4321;
   const deps = await fixture(t, {
@@ -1522,6 +1608,8 @@ test("self-unregister preserves an exact foreign public readiness without its pe
 
 test("self-unregister rejects and preserves equal readiness files with different inodes", async (t) => {
   const currentPid = 4321;
+  let readinessHandleClosed = false;
+  let readinessInspections = 0;
   let readyPath;
   let expectedReady;
   const deps = await fixture(t, {
@@ -1535,12 +1623,47 @@ test("self-unregister rejects and preserves equal readiness files with different
       await rm(pendingPath);
       await writeFile(pendingPath, expectedReady, { mode: 0o600 });
       await writeFile(readyPath, expectedReady, { mode: 0o600 });
+      assert.equal(readinessHandleClosed, false);
     },
   });
   deps.loaded.clear();
   await registerControllerAgent(deps);
+  const originalLstat = deps.fs.lstat.bind(deps.fs);
+  const originalOpen = deps.fs.open.bind(deps.fs);
+  deps.fs = {
+    ...deps.fs,
+    async lstat(path, ...args) {
+      if (readyPath !== undefined && [readyPath, `${readyPath}.pending`].includes(String(path))) {
+        assert.equal(readinessHandleClosed, false);
+        readinessInspections += 1;
+      }
+      return originalLstat(path, ...args);
+    },
+    async open(path, flags, ...args) {
+      const handle = await originalOpen(path, flags, ...args);
+      if (
+        flags !== "wx" ||
+        !String(path).includes(".controller-unregister-helper-ready.") ||
+        !String(path).includes(".tmp.")
+      ) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "close") {
+            return async () => {
+              await target.close();
+              readinessHandleClosed = true;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+  };
 
   await assert.rejects(unregisterControllerAgent(deps), /helper readiness is invalid/i);
+  assert.equal(readinessHandleClosed, true);
+  assert.equal(readinessInspections >= 4, true);
   assert.deepEqual(await readFile(readyPath), expectedReady);
   assert.deepEqual(await readFile(`${readyPath}.pending`), expectedReady);
   assert.notEqual((await stat(readyPath)).ino, (await stat(`${readyPath}.pending`)).ino);
@@ -1550,7 +1673,12 @@ test("self-unregister rejects and preserves equal readiness files with different
 
 test("self-unregister keeps persistence when the helper PID changes after readiness", async (t) => {
   const currentPid = 4321;
+  const closeError = new Error("injected retained readiness handle close failure");
+  const events = [];
+  const movedPaths = new Map();
   let helperInspections = 0;
+  let readyPath = null;
+  let readinessHandleClosed = false;
   const deps = await fixture(t, {
     currentPid,
     printPid: (label) => {
@@ -1558,9 +1686,69 @@ test("self-unregister keeps persistence when the helper PID changes after readin
       helperInspections += 1;
       return helperInspections <= 2 ? 8765 : 9876;
     },
+    onSubmit: async ({ args }) => {
+      readyPath = args.at(-2);
+    },
   });
   deps.loaded.clear();
   await registerControllerAgent(deps);
+  const originalOpen = deps.fs.open.bind(deps.fs);
+  const originalRename = deps.fs.rename.bind(deps.fs);
+  const originalRm = deps.fs.rm.bind(deps.fs);
+  const readinessKind = (path) => {
+    if (readyPath !== null && path === readyPath) return "public";
+    if (readyPath !== null && path === `${readyPath}.pending`) return "pending";
+    return movedPaths.get(path) ?? null;
+  };
+  deps.fs = {
+    ...deps.fs,
+    async open(path, flags, ...args) {
+      const handle = await originalOpen(path, flags, ...args);
+      if (
+        flags !== "wx" ||
+        !String(path).includes(".controller-unregister-helper-ready.") ||
+        !String(path).includes(".tmp.")
+      ) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "close") {
+            return async () => {
+              await target.close();
+              readinessHandleClosed = true;
+              events.push("handle:close");
+              throw closeError;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    async rename(from, to, ...args) {
+      const source = String(from);
+      const target = String(to);
+      const kind = readinessKind(source);
+      const result = await originalRename(from, to, ...args);
+      if (kind !== null) {
+        assert.equal(readinessHandleClosed, false);
+        events.push(`${kind}:rename`);
+        movedPaths.delete(source);
+        movedPaths.set(target, kind);
+      }
+      return result;
+    },
+    async rm(path, ...args) {
+      const selected = String(path);
+      const kind = readinessKind(selected);
+      const result = await originalRm(path, ...args);
+      if (kind !== null) {
+        assert.equal(readinessHandleClosed, false);
+        events.push(`${kind}:delete`);
+        movedPaths.delete(selected);
+      }
+      return result;
+    },
+  };
 
   await assert.rejects(
     unregisterControllerAgent(deps),
@@ -1571,9 +1759,21 @@ test("self-unregister keeps persistence when the helper PID changes after readin
         error.errors.some((entry) => entry?.code === "UNREGISTER_HELPER_IDENTITY_CHANGED"),
         true,
       );
+      assert.equal(error.errors.includes(closeError), true);
       return true;
     },
   );
+  assert.equal(await pathExists(readyPath), false);
+  assert.equal(await pathExists(`${readyPath}.pending`), false);
+  assert.equal(readinessHandleClosed, true);
+  assert.equal(events.includes("public:delete"), true);
+  assert.equal(events.includes("pending:delete"), true);
+  const closeIndex = events.lastIndexOf("handle:close");
+  const lastMutation = Math.max(
+    events.lastIndexOf("public:delete"),
+    events.lastIndexOf("pending:delete"),
+  );
+  assert.equal(closeIndex > lastMutation, true);
   assert.equal(await pathExists(deps.controllerPlistPath), true);
   assert.equal(deps.loaded.has(deps.label), true);
   assert.equal(

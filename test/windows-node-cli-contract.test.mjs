@@ -4,6 +4,7 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import {
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -185,7 +186,7 @@ test("real Windows Node CLI stays isolated, portable, and crash-safe", {
   skip: process.platform !== "win32",
   timeout: 120_000,
 }, async (t) => {
-  const stateRoot = await mkdtemp(join(tmpdir(), "heige-windows-node-cli-"));
+  const stateRoot = await realpath(await mkdtemp(join(tmpdir(), "heige-windows-node-cli-")));
   const statePath = join(stateRoot, "state.json");
   const fixturePath = join(stateRoot, "runtime-fixture.json");
   const taskName = `HeiGe Codex Skin Studio Test ${randomUUID()}`;

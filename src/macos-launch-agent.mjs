@@ -795,14 +795,18 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
   await assertSnapshotCurrent(options.fs, readyTemporaryPath, null);
   let helperIdentity = null;
   let readySnapshot = null;
+  let readyTemporaryHandle = null;
   let readyTemporarySnapshot = null;
   try {
-    readyTemporarySnapshot = await atomicWrite(
+    const retainedReady = await atomicWrite(
       options.fs,
       readyTemporaryPath,
       expectedReady,
       0o600,
+      { retainHandle: true },
     );
+    readyTemporaryHandle = retainedReady.handle;
+    readyTemporarySnapshot = retainedReady.snapshot;
     await command(options, "/bin/launchctl", [
       "submit",
       "-l",
@@ -858,6 +862,8 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
         await removeSnapshotPath(options.fs, readyPath, readySnapshot);
         readySnapshot = null;
         await removeSnapshotPath(options.fs, readyTemporaryPath, readyTemporarySnapshot);
+        await readyTemporaryHandle.close();
+        readyTemporaryHandle = null;
         readyTemporarySnapshot = null;
         const finalIdentity = await readStableLoadedJobIdentity(options, helperLabel);
         if (!sameProcessIdentity(finalIdentity, helperIdentity)) {
@@ -908,6 +914,14 @@ async function startUnregisterHelper(options, programArguments, targetPid) {
           readyTemporaryPath,
           readyTemporarySnapshot,
         );
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (readyTemporaryHandle !== null) {
+      try {
+        await readyTemporaryHandle.close();
+        readyTemporaryHandle = null;
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }
@@ -1067,7 +1081,7 @@ async function assertCanonicalDirectory(fs, path) {
   }
 }
 
-async function atomicWrite(fs, path, bytes, mode = 0o600) {
+async function atomicWrite(fs, path, bytes, mode = 0o600, { retainHandle = false } = {}) {
   const parent = dirname(path);
   await ensureDirectory(fs, parent);
   const temporaryPath = `${path}.tmp.${randomUUID()}`;
@@ -1112,6 +1126,11 @@ async function atomicWrite(fs, path, bytes, mode = 0o600) {
       "FILE_CAPABILITY_CONFLICT",
     );
     publishedSnapshot = published.published;
+    if (retainHandle) {
+      const retainedHandle = handle;
+      handle = undefined;
+      return { handle: retainedHandle, snapshot: publishedSnapshot };
+    }
     await handle.close();
     handle = undefined;
     return publishedSnapshot;
