@@ -87,12 +87,17 @@ test("notice does not pretend a disclaimer grants redistribution rights", async 
 });
 
 test("remote disposition records the read-only snapshot and one package hash marker", async () => {
-  const text = await readFile(
-    new URL("../docs/release/2026-07-16-audit-hardening-disposition.md", import.meta.url),
-    "utf8",
-  );
-  const markers = text.match(/^<!-- heige-package-sha256 --> Package SHA-256: (?:pending final build|[a-f0-9]{64})$/gm) ?? [];
+  const [text, artifact] = await Promise.all([
+    readFile(
+      new URL("../docs/release/2026-07-16-audit-hardening-disposition.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../output/heige-codex-skin-studio.skill", import.meta.url)),
+  ]);
+  const markers = text.match(/^<!-- heige-package-sha256 --> Package SHA-256: [a-f0-9]{64}$/gm) ?? [];
   assert.equal(markers.length, 1);
+  const expectedHash = createHash("sha256").update(artifact).digest("hex");
+  assert.equal(markers[0], `<!-- heige-package-sha256 --> Package SHA-256: ${expectedHash}`);
   for (const fact of [
     "fdf374e2123e3b47183ff86af62aded8f69c0096",
     "4a8283276db8f7ec999ce49ca489113c2ac82888cab93cce00b232540e54e537",

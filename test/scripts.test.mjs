@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  readMacCdpProcess,
   requestNormalQuit,
   runLifecycleActionFile,
   spawnDetachedLifecycle,
@@ -234,6 +235,136 @@ test("the default normal quit request is PID-bound and never addresses a bundle 
   assert.doesNotMatch(calls[0][1].join(" "), /com\.openai\.codex|application id/i);
 });
 
+test("lifecycle compensation accepts inherited CDP listener FDs inside the exact app tree", async () => {
+  const appPath = "/Applications/ChatGPT.app";
+  const executablePath = `${appPath}/Contents/MacOS/ChatGPT`;
+  const root = {
+    pid: 7001,
+    executablePath,
+    startedAt: "Fri Jul 17 09:00:00 2026",
+    commandLine: `${executablePath} --remote-debugging-port=9341`,
+    hasCdp: true,
+    cdpPort: 9341,
+  };
+  const processTable = [
+    ` 7001 1 Fri Jul 17 09:00:00 2026 ${root.commandLine}`,
+    " 7002 7001 Fri Jul 17 09:00:01 2026 /Users/example/.codex/computer-use/service",
+    "",
+  ].join("\n");
+  const observed = await readMacCdpProcess({ appPath, port: 9341 }, {
+    run: async (file) => {
+      if (file === "/usr/sbin/lsof") return { stdout: "7001\n7002\n" };
+      if (file === "/bin/ps") return { stdout: processTable };
+      throw new Error(`unexpected command ${file}`);
+    },
+    listProcesses: async () => [root],
+    readIdentity: async () => ({
+      pid: root.pid,
+      executablePath: root.executablePath,
+      startedAt: root.startedAt,
+    }),
+  });
+  assert.deepEqual(observed, {
+    pid: root.pid,
+    executablePath: root.executablePath,
+    startedAt: root.startedAt,
+  });
+});
+
+test("lifecycle compensation rejects a CDP listener outside the exact app tree", async () => {
+  const appPath = "/Applications/ChatGPT.app";
+  const executablePath = `${appPath}/Contents/MacOS/ChatGPT`;
+  const root = {
+    pid: 7001,
+    executablePath,
+    startedAt: "Fri Jul 17 09:00:00 2026",
+    commandLine: `${executablePath} --remote-debugging-port=9341`,
+    hasCdp: true,
+    cdpPort: 9341,
+  };
+  const processTable = [
+    ` 7001 1 Fri Jul 17 09:00:00 2026 ${root.commandLine}`,
+    " 8001 1 Fri Jul 17 09:00:01 2026 /tmp/foreign-listener",
+    "",
+  ].join("\n");
+  await assert.rejects(readMacCdpProcess({ appPath, port: 9341 }, {
+    run: async (file) => {
+      if (file === "/usr/sbin/lsof") return { stdout: "7001\n8001\n" };
+      if (file === "/bin/ps") return { stdout: processTable };
+      throw new Error(`unexpected command ${file}`);
+    },
+    listProcesses: async () => [root],
+    readIdentity: async () => root,
+  }), /foreign owner/);
+});
+
+test("lifecycle CDP owner attribution rejects incomplete cyclic and drifted process graphs", async (t) => {
+  const appPath = "/Applications/ChatGPT.app";
+  const executablePath = `${appPath}/Contents/MacOS/ChatGPT`;
+  const root = {
+    pid: 7001,
+    executablePath,
+    startedAt: "Fri Jul 17 09:00:00 2026",
+    commandLine: `${executablePath} --remote-debugging-port=9341`,
+    hasCdp: true,
+    cdpPort: 9341,
+  };
+  const cases = [
+    {
+      name: "root owner absent",
+      owners: [7002],
+      rows: [` 7001 1 Fri Jul 17 09:00:00 2026 ${root.commandLine}`],
+      pattern: /根进程不唯一/,
+    },
+    {
+      name: "missing ancestor",
+      owners: [7001, 7002],
+      rows: [
+        ` 7001 1 Fri Jul 17 09:00:00 2026 ${root.commandLine}`,
+        " 7002 9000 Fri Jul 17 09:00:01 2026 /tmp/inherited-listener",
+      ],
+      pattern: /foreign owner/,
+    },
+    {
+      name: "cyclic ancestry",
+      owners: [7001, 7002],
+      rows: [
+        ` 7001 1 Fri Jul 17 09:00:00 2026 ${root.commandLine}`,
+        " 7002 7003 Fri Jul 17 09:00:01 2026 /tmp/inherited-listener",
+        " 7003 7002 Fri Jul 17 09:00:02 2026 /tmp/cycle",
+      ],
+      pattern: /cyclic/,
+    },
+    {
+      name: "root start identity drift",
+      owners: [7001],
+      rows: [` 7001 1 Fri Jul 17 09:05:00 2026 ${root.commandLine}`],
+      pattern: /identity changed/,
+    },
+    {
+      name: "root command drift",
+      owners: [7001],
+      rows: [" 7001 1 Fri Jul 17 09:00:00 2026 /tmp/foreign-root"],
+      pattern: /identity changed/,
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      await assert.rejects(readMacCdpProcess({ appPath, port: 9341 }, {
+        run: async (file) => {
+          if (file === "/usr/sbin/lsof") {
+            return { stdout: `${scenario.owners.join("\n")}\n` };
+          }
+          if (file === "/bin/ps") return { stdout: `${scenario.rows.join("\n")}\n` };
+          throw new Error(`unexpected command ${file}`);
+        },
+        listProcesses: async () => [root],
+        readIdentity: async () => root,
+      }), scenario.pattern);
+    });
+  }
+});
+
 test("a replaced PID aborts before quit or launch", async () => {
   const root = await mkdtemp(join(tmpdir(), "heige-lifecycle-replaced-"));
   const path = join(root, "action.json");
@@ -376,16 +507,18 @@ test("a failed detached continuation restores the exact native prestate and reth
   const continuationError = new Error("apply failed with secret token and /private/input");
   const calls = [];
   let originalProbes = 0;
+  let launchedProbes = 0;
+  let releaseProbes = 0;
   await assert.rejects(runLifecycleActionFile(path, {
     readProcessIdentity: async (pid) => {
       calls.push(["process", pid]);
       if (pid === original.pid) return ++originalProbes === 1 ? original : null;
-      if (pid === launched.pid) return null;
+      if (pid === launched.pid) return ++launchedProbes === 1 ? launched : null;
       throw new Error(`unexpected pid ${pid}`);
     },
     requestQuit: async ({ process }) => calls.push(["quit", process.pid]),
     launchApp: async ({ args }) => calls.push(["launch", args]),
-    wait: async () => {},
+    wait: async (milliseconds) => calls.push(["wait", milliseconds]),
     waitForPort: async (port) => calls.push(["port", port]),
     runAfterLaunch: async () => { throw continuationError; },
     readCdpProcess: async ({ port }) => {
@@ -394,7 +527,7 @@ test("a failed detached continuation restores the exact native prestate and reth
     },
     verifyPortReleased: async (port) => {
       calls.push(["port-released", port]);
-      return true;
+      return ++releaseProbes > 1;
     },
     readAppProcesses: async () => {
       calls.push(["app-processes"]);
@@ -408,8 +541,11 @@ test("a failed detached continuation restores the exact native prestate and reth
     ["launch", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"]],
     ["port", 9341],
     ["cdp-process", 9341],
+    ["process", 5252],
     ["quit", 5252],
     ["process", 5252],
+    ["port-released", 9341],
+    ["wait", 250],
     ["port-released", 9341],
     ["launch", []],
     ["app-processes"],
@@ -459,10 +595,11 @@ test("a failed detached continuation restores the exact closed prestate and reth
   });
   const continuationError = new Error("closed apply failed");
   const calls = [];
+  let launchedProbes = 0;
   await assert.rejects(runLifecycleActionFile(path, {
     readProcessIdentity: async (pid) => {
       calls.push(["process", pid]);
-      return null;
+      return ++launchedProbes === 1 ? launched : null;
     },
     requestQuit: async ({ process }) => calls.push(["quit", process.pid]),
     launchApp: async ({ args }) => calls.push(["launch", args]),
@@ -486,6 +623,7 @@ test("a failed detached continuation restores the exact closed prestate and reth
     ["launch", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9341"]],
     ["port", 9341],
     ["cdp-process", 9341],
+    ["process", 5252],
     ["quit", 5252],
     ["process", 5252],
     ["port-released", 9341],
@@ -522,6 +660,7 @@ test("a detached compensation failure preserves both errors and writes only a sa
     waitForPort: async () => {},
     runAfterLaunch: async () => { throw continuationError; },
     readCdpProcess: async () => launched,
+    readProcessIdentity: async () => launched,
     requestQuit: async () => { throw compensationError; },
   }), (error) => {
     assert.ok(error instanceof AggregateError);

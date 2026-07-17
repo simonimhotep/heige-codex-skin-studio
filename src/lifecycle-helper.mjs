@@ -331,10 +331,10 @@ async function readActionFile(actionPath, options) {
   return action;
 }
 
-async function defaultReadProcessIdentity(pid, expected) {
+async function defaultReadProcessIdentity(pid, expected, { run = execFile } = {}) {
   let stdout;
   try {
-    ({ stdout } = await execFile("/bin/ps", ["-p", String(pid), "-o", "pid=,lstart=,command="]));
+    ({ stdout } = await run("/bin/ps", ["-p", String(pid), "-o", "pid=,lstart=,command="]));
   } catch (error) {
     if (error?.code === 1) return null;
     throw error;
@@ -398,27 +398,112 @@ async function defaultVerifyPortReleased(port) {
   }
 }
 
-async function defaultReadCdpProcess({ appPath, port }) {
-  const { stdout } = await execFile("/usr/sbin/lsof", [
+function parseMacProcessTree(output) {
+  const rows = [];
+  for (const line of String(output).split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(.*)$/);
+    if (!match) continue;
+    rows.push({
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      startedAt: `${match[3]} ${match[4]} ${match[5]} ${match[6]} ${match[7]}`,
+      commandLine: match[8],
+    });
+  }
+  return rows;
+}
+
+export async function verifyMacProcessOwnerTree({ rootProcess, ownerPids, run = execFile } = {}) {
+  const root = processIdentity({
+    pid: rootProcess?.pid,
+    executablePath: rootProcess?.executablePath,
+    startedAt: rootProcess?.startedAt,
+  });
+  if (!Array.isArray(ownerPids) || typeof run !== "function") {
+    throw new TypeError("CDP listener owner verification input is invalid");
+  }
+  const owners = [...new Set(ownerPids)];
+  if (!owners.includes(root.pid) || owners.some((pid) => !Number.isSafeInteger(pid) || pid <= 0)) {
+    throw new Error("CDP listener owners do not include the exact Codex root process");
+  }
+  const { stdout } = await run("/bin/ps", ["-axo", "pid=,ppid=,lstart=,command="]);
+  const rows = new Map(parseMacProcessTree(stdout).map((row) => [row.pid, row]));
+  const rootRow = rows.get(root.pid);
+  if (
+    rootRow?.startedAt !== root.startedAt
+    || !(rootRow.commandLine === root.executablePath || rootRow.commandLine.startsWith(`${root.executablePath} `))
+  ) throw new Error("CDP root process identity changed during global owner verification");
+  for (const owner of owners) {
+    let pid = owner;
+    const visited = new Set();
+    while (pid !== root.pid) {
+      if (visited.has(pid) || visited.size > 64) {
+        throw new Error("CDP listener owner ancestry is cyclic or too deep");
+      }
+      visited.add(pid);
+      const row = rows.get(pid);
+      if (row === undefined || row.ppid <= 0) {
+        throw new Error("CDP listener has a foreign owner outside the exact Codex process tree");
+      }
+      pid = row.ppid;
+    }
+  }
+  return { exactRoot: true, ownerCount: owners.length };
+}
+
+export async function readMacCdpProcess({ appPath, port } = {}, {
+  run = execFile,
+  listProcesses = listCodexProcesses,
+  readIdentity = null,
+} = {}) {
+  absolutePath(appPath, "appPath");
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new TypeError("CDP 端口必须是 1024 到 65535 的整数");
+  }
+  const identityReader = readIdentity ?? ((pid, expected) => defaultReadProcessIdentity(pid, expected, { run }));
+  if (![run, listProcesses, identityReader].every((value) => typeof value === "function")) {
+    throw new TypeError("CDP 进程读取依赖必须是函数");
+  }
+  const { stdout } = await run("/usr/sbin/lsof", [
     "-nP",
     `-iTCP:${port}`,
     "-sTCP:LISTEN",
     "-t",
   ]);
-  const pids = [...new Set(stdout.split(/\s+/).filter(Boolean).map(Number))];
-  if (pids.length !== 1 || !Number.isSafeInteger(pids[0]) || pids[0] <= 0) {
-    throw new Error(`CDP 端口 ${port} 的监听进程不唯一`);
+  const tokens = String(stdout).split(/\s+/).filter(Boolean);
+  if (tokens.length === 0 || tokens.some((token) => !/^[1-9]\d*$/.test(token))) {
+    throw new Error(`CDP 端口 ${port} 的监听进程无效`);
   }
-  const expected = {
-    pid: pids[0],
-    executablePath: join(appPath, "Contents", "MacOS", "ChatGPT"),
-    startedAt: "pending",
-  };
-  const observed = await defaultReadProcessIdentity(pids[0], expected);
-  if (observed?.executablePath !== expected.executablePath) {
-    throw new Error(`CDP 端口 ${port} 不属于已解析的 Codex 应用`);
+  const ownerPids = [...new Set(tokens.map(Number))];
+  if (ownerPids.some((pid) => !Number.isSafeInteger(pid))) {
+    throw new Error(`CDP 端口 ${port} 的监听进程无效`);
   }
-  return observed;
+  const executablePath = join(appPath, "Contents", "MacOS", "ChatGPT");
+  const processes = await listProcesses({ app: { executablePath }, exec: run });
+  if (!Array.isArray(processes)) throw new Error("Codex 进程列表无效");
+  const candidates = processes.filter((candidate) => (
+    candidate?.executablePath === executablePath
+    && candidate.cdpPort === port
+    && ownerPids.includes(candidate.pid)
+  ));
+  if (candidates.length !== 1) {
+    throw new Error(`CDP 端口 ${port} 的 Codex 根进程不唯一`);
+  }
+  const expected = processIdentity({
+    pid: candidates[0].pid,
+    executablePath,
+    startedAt: candidates[0].startedAt,
+  });
+  await verifyMacProcessOwnerTree({ rootProcess: expected, ownerPids, run });
+  const observed = await identityReader(expected.pid, expected);
+  if (!sameProcessIdentity(observed, expected)) {
+    throw new Error(`CDP 端口 ${port} 的 Codex 根进程身份已变化`);
+  }
+  return processIdentity({
+    pid: observed.pid,
+    executablePath: observed.executablePath,
+    startedAt: observed.startedAt,
+  });
 }
 
 async function defaultReadAppProcesses({ appPath }) {
@@ -446,6 +531,10 @@ async function restoreContinuationPrestate(action, {
   if (launched.executablePath !== expectedExecutable) {
     throw new Error("新启动的 CDP 进程不属于已解析的 Codex 应用");
   }
+  const beforeQuit = await readProcessIdentity(launched.pid, launched);
+  if (!sameProcessIdentity(beforeQuit, launched)) {
+    throw new Error("新启动的 CDP 进程身份在退出前已变化");
+  }
   await requestQuit({ appPath: action.appPath, process: launched });
   let disappeared = false;
   for (let attempt = 0; attempt < maxWaitAttempts; attempt += 1) {
@@ -457,7 +546,13 @@ async function restoreContinuationPrestate(action, {
     await wait(waitIntervalMs);
   }
   if (!disappeared) throw new Error("补偿失败：Codex CDP 进程未正常退出");
-  if (!(await verifyPortReleased(action.port))) {
+  let portReleased = false;
+  for (let attempt = 0; attempt < maxWaitAttempts; attempt += 1) {
+    portReleased = await verifyPortReleased(action.port);
+    if (portReleased) break;
+    await wait(waitIntervalMs);
+  }
+  if (!portReleased) {
     throw new Error(`补偿失败：CDP 端口 ${action.port} 仍被占用`);
   }
   if (action.process !== null) await launchApp({ appPath: action.appPath, args: [] });
@@ -515,7 +610,7 @@ async function executeLifecycleAction(action, deps = {}) {
   const waitForPort = deps.waitForPort ?? defaultWaitForPort;
   const runAfterLaunch = deps.runAfterLaunch ?? defaultRunAfterLaunch;
   const verifyPortReleased = deps.verifyPortReleased ?? defaultVerifyPortReleased;
-  const readCdpProcess = deps.readCdpProcess ?? defaultReadCdpProcess;
+  const readCdpProcess = deps.readCdpProcess ?? readMacCdpProcess;
   const readAppProcesses = deps.readAppProcesses ?? defaultReadAppProcesses;
   const maxWaitAttempts = deps.maxWaitAttempts ?? 120;
   const waitIntervalMs = deps.waitIntervalMs ?? 250;

@@ -82,6 +82,56 @@ try {
         Assert-True (Enter-HeiGeInstallMutex -Mutex $fakeMutex)
     }
 
+    Test-Case "Real abandoned mutex remains owned and releasable" {
+        $suffix = [guid]::NewGuid().ToString("N")
+        $mutexName = "Local\HeiGeSkinInstallTest-$suffix"
+        $childScript = Join-Path ([System.IO.Path]::GetTempPath()) "heige-abandon-mutex-$suffix.ps1"
+        $mutex = $null
+        $process = $null
+        $ownsMutex = $false
+        try {
+            [System.IO.File]::WriteAllText($childScript, @'
+param([Parameter(Mandatory = $true)][string]$Name)
+$ErrorActionPreference = "Stop"
+$mutex = New-Object System.Threading.Mutex($false, $Name)
+if (-not $mutex.WaitOne(5000)) { exit 2 }
+exit 0
+'@)
+            $mutex = New-Object System.Threading.Mutex($false, $mutexName)
+            $hostPath = (Get-Process -Id $PID).Path
+            $arguments = @("-NoLogo", "-NoProfile")
+            if ($PSVersionTable.PSEdition -eq "Desktop") {
+                $arguments += @("-ExecutionPolicy", "Bypass")
+            }
+            $quotedChildScript = '"' + $childScript + '"'
+            $arguments += @("-File", $quotedChildScript, "-Name", $mutexName)
+            $process = Start-Process -FilePath $hostPath -ArgumentList $arguments -Wait -PassThru
+            Assert-Equal 0 $process.ExitCode
+
+            $ownsMutex = Enter-HeiGeInstallMutex -Mutex $mutex
+            Assert-True $ownsMutex
+            $mutex.ReleaseMutex()
+            $ownsMutex = $false
+        } finally {
+            if ($ownsMutex -and $null -ne $mutex) {
+                try { $mutex.ReleaseMutex() } catch { }
+            }
+            if ($null -ne $mutex) { $mutex.Dispose() }
+            if ($null -ne $process) { $process.Dispose() }
+            Remove-Item -LiteralPath $childScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Test-Case "Non-abandoned mutex failures remain visible" {
+        $fakeMutex = New-Object PSObject
+        $fakeMutex | Add-Member -MemberType ScriptMethod -Name WaitOne -Value {
+            throw (New-Object System.InvalidOperationException("mutex probe failure"))
+        }
+        Assert-Throws {
+            Enter-HeiGeInstallMutex -Mutex $fakeMutex
+        } "mutex probe failure"
+    }
+
     Test-Case "First apply follows commit finalization and journal deletion" {
         $commit = $script:InstallerSource.IndexOf(
             '-Phase "commit-decided" -Decision "commit"',

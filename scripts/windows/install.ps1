@@ -385,9 +385,16 @@ function Enter-HeiGeInstallMutex {
     param([Parameter(Mandatory = $true)]$Mutex)
     try {
         return [bool]$Mutex.WaitOne(0)
-    } catch [System.Threading.AbandonedMutexException] {
-        # WaitOne transfers ownership before reporting that the prior owner died.
-        return $true
+    } catch {
+        $currentException = $_.Exception
+        while ($null -ne $currentException) {
+            if ($currentException -is [System.Threading.AbandonedMutexException]) {
+                # WaitOne transfers ownership before reporting that the prior owner died.
+                return $true
+            }
+            $currentException = $currentException.InnerException
+        }
+        throw
     }
 }
 

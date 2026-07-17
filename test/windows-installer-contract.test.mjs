@@ -73,7 +73,7 @@ test("Windows abandoned mutex ownership continues into durable recovery", async 
   const installer = await readFile(installerPath, "utf8");
   assert.match(
     installer,
-    /function Enter-HeiGeInstallMutex[\s\S]*catch \[System\.Threading\.AbandonedMutexException\][\s\S]*return \$true/,
+    /function Enter-HeiGeInstallMutex[\s\S]*catch \{[\s\S]*\$currentException = \$_\.Exception[\s\S]*\$currentException -is \[System\.Threading\.AbandonedMutexException\][\s\S]*return \$true[\s\S]*\$currentException = \$currentException\.InnerException[\s\S]*throw/,
   );
   assert.match(
     installer,

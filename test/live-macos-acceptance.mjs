@@ -39,7 +39,11 @@ import {
   runProductionMacosInstallRecovery,
 } from "../src/macos-install-coordinator.mjs";
 import { resolveStudioPaths } from "../src/constants.mjs";
-import { requestNormalQuit } from "../src/lifecycle-helper.mjs";
+import {
+  readMacCdpProcess,
+  requestNormalQuit,
+  verifyMacProcessOwnerTree,
+} from "../src/lifecycle-helper.mjs";
 import {
   inspectLaunchAgent,
   inspectLaunchAgentProcessIdentity,
@@ -1879,8 +1883,10 @@ async function inspectAppAndProcess({ home, run = execFile }) {
     throw new Error(`预期唯一一个 Codex CDP 主进程，实际 Codex 进程 ${processes.length}`);
   }
   const processIdentity = processes[0];
-  const owners = await portOwners(PORT, run);
-  await verifyCodexPortOwnerTree({ rootProcess: processIdentity, ownerPids: owners, run });
+  const attributed = await readMacCdpProcess({ appPath: app.appPath, port: PORT }, { run });
+  if (!sameProcessIdentity(attributed, processIdentity)) {
+    throw new Error("Codex CDP root identity changed during preflight attribution");
+  }
   return {
     app,
     identity,
@@ -1921,50 +1927,8 @@ async function portOwners(port, run = execFile) {
   }
 }
 
-function parseMacProcessTree(output) {
-  const rows = [];
-  for (const line of String(output).split(/\r?\n/)) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(.*)$/);
-    if (!match) continue;
-    rows.push({
-      pid: Number(match[1]),
-      ppid: Number(match[2]),
-      startedAt: `${match[3]} ${match[4]} ${match[5]} ${match[6]} ${match[7]}`,
-      commandLine: match[8],
-    });
-  }
-  return rows;
-}
-
 export async function verifyCodexPortOwnerTree({ rootProcess, ownerPids, run = execFile }) {
-  const root = publicProcessIdentity(rootProcess);
-  const owners = [...new Set(ownerPids ?? [])];
-  if (!owners.includes(root.pid) || owners.some((pid) => !Number.isSafeInteger(pid) || pid <= 0)) {
-    throw new Error("CDP listener owners do not include the exact Codex root process");
-  }
-  const { stdout } = await run("/bin/ps", ["-axo", "pid=,ppid=,lstart=,command="]);
-  const rows = new Map(parseMacProcessTree(stdout).map((row) => [row.pid, row]));
-  const rootRow = rows.get(root.pid);
-  if (
-    rootRow?.startedAt !== root.startedAt
-    || !(rootRow.commandLine === root.executablePath || rootRow.commandLine.startsWith(`${root.executablePath} `))
-  ) throw new Error("CDP root process identity changed during global owner verification");
-  for (const owner of owners) {
-    let pid = owner;
-    const visited = new Set();
-    while (pid !== root.pid) {
-      if (visited.has(pid) || visited.size > 64) {
-        throw new Error("CDP listener owner ancestry is cyclic or too deep");
-      }
-      visited.add(pid);
-      const row = rows.get(pid);
-      if (row === undefined || row.ppid <= 0) {
-        throw new Error("CDP listener has a foreign owner outside the exact Codex process tree");
-      }
-      pid = row.ppid;
-    }
-  }
-  return { exactRoot: true, ownerCount: owners.length };
+  return verifyMacProcessOwnerTree({ rootProcess, ownerPids, run });
 }
 
 async function waitForValue(action, predicate, {
@@ -1998,12 +1962,17 @@ async function inspectSingleCodexProcess({
   const processes = await listCodexProcesses({ app, exec: run });
   if (processes.length !== 1) throw new Error(`expected exactly one Codex process, observed ${processes.length}`);
   const processIdentity = processes[0];
-  const owners = await portOwners(PORT, run);
   if (mode === "cdp") {
     if (processIdentity.cdpPort !== PORT) throw new Error("Codex process does not expose the expected CDP port");
-    await verifyCodexPortOwnerTree({ rootProcess: processIdentity, ownerPids: owners, run });
-  } else if (processIdentity.hasCdp || processIdentity.cdpPort !== null || owners.length !== 0) {
-    throw new Error("native Codex unexpectedly retained a CDP listener");
+    const attributed = await readMacCdpProcess({ appPath: app.appPath, port: PORT }, { run });
+    if (!sameProcessIdentity(attributed, processIdentity)) {
+      throw new Error("Codex CDP root identity changed during high-level attribution");
+    }
+  } else {
+    const owners = await portOwners(PORT, run);
+    if (processIdentity.hasCdp || processIdentity.cdpPort !== null || owners.length !== 0) {
+      throw new Error("native Codex unexpectedly retained a CDP listener");
+    }
   }
   return {
     app,
