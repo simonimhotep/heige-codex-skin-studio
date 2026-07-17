@@ -889,8 +889,10 @@ try {
         Assert-Match 'launcher v1 \| current-user \| re-enable skin' $source
         Assert-Match '\$shortcut\.Arguments\s*=\s*\$script:HeiGeStartMenuArguments' $source
         Assert-Match '\$shortcut\.WindowStyle\s*=\s*\$script:HeiGeStartMenuWindowStyle' $source
+        Assert-Match 'IsNullOrEmpty\(\$script:HeiGeStartMenuHotkey\)' $source
         Assert-Match '\$shortcut\.Hotkey\s*=\s*\$script:HeiGeStartMenuHotkey' $source
-        Assert-False ($source -match '\$shortcut\.IconLocation\s*=')
+        Assert-Match 'IsNullOrEmpty\(\$script:HeiGeStartMenuIconLocation\)' $source
+        Assert-Match '\$shortcut\.IconLocation\s*=\s*\$script:HeiGeStartMenuIconLocation' $source
         Assert-Match 'ConvertFrom-HeiGeWshIconLocation' $source
     }
 

@@ -127,7 +127,12 @@ function New-DefaultHeiGeShortcut {
     $shortcut.Description = $Description
     $shortcut.Arguments = $script:HeiGeStartMenuArguments
     $shortcut.WindowStyle = $script:HeiGeStartMenuWindowStyle
-    $shortcut.Hotkey = $script:HeiGeStartMenuHotkey
+    if (-not [string]::IsNullOrEmpty($script:HeiGeStartMenuHotkey)) {
+        $shortcut.Hotkey = $script:HeiGeStartMenuHotkey
+    }
+    if (-not [string]::IsNullOrEmpty($script:HeiGeStartMenuIconLocation)) {
+        $shortcut.IconLocation = $script:HeiGeStartMenuIconLocation
+    }
     $shortcut.Save()
 }
 
