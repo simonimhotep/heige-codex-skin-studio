@@ -11,7 +11,7 @@ import { readBoundedFile, RESOURCE_LIMITS, sumWithinLimit } from "./resource-lim
 const STYLE_ID = "heige-codex-skin-style";
 const MENU_ID = "heige-codex-skin-menu";
 const SIGNATURE_CARD_FRAME_PATH = fileURLToPath(
-  new URL("../assets/signature-card-frame.png", import.meta.url),
+  new URL("./signature-card-frame.png", import.meta.url),
 );
 const MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
 async function waitForMainTargets(wait, port, { timeoutMs = 20_000, pollMs = 500 } = {}) {

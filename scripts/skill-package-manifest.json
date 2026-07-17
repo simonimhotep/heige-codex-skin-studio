@@ -170,6 +170,12 @@
       "exclude": []
     },
     {
+      "source": "src/signature-card-frame.png",
+      "destination": "payload/src/signature-card-frame.png",
+      "recursive": false,
+      "exclude": []
+    },
+    {
       "source": "src/state-store.mjs",
       "destination": "payload/src/state-store.mjs",
       "recursive": false,
@@ -214,12 +220,6 @@
     {
       "source": "src/windows-secure-fs.mjs",
       "destination": "payload/src/windows-secure-fs.mjs",
-      "recursive": false,
-      "exclude": []
-    },
-    {
-      "source": "assets/signature-card-frame.png",
-      "destination": "payload/assets/signature-card-frame.png",
       "recursive": false,
       "exclude": []
     },

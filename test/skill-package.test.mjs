@@ -199,7 +199,7 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
   const entries = await zipEntries(archive);
   const names = entries.map(({ name }) => name);
   assert.equal(
-    names.filter((name) => name === "heige-codex-skin-studio/payload/assets/signature-card-frame.png").length,
+    names.filter((name) => name === "heige-codex-skin-studio/payload/src/signature-card-frame.png").length,
     1,
     "the reusable signature-card frame must ship exactly once",
   );

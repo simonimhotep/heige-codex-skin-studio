@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const documentPath = resolve(root, "ASSET_PROVENANCE.md");
-const visualPath = /^(?:assets|themes|custom-pet|docs\/images)\/.*\.(?:png|jpe?g|webp)$/i;
+const visualPath = /^(?:(?:assets|themes|custom-pet|docs\/images)\/.*|src\/signature-card-frame)\.(?:png|jpe?g|webp)$/i;
 const APPROVED_RELEASE_STATUS = "已验证可公开再分发";
 
 if (process.argv.length !== 3 || !new Set(["--check", "--release"]).has(process.argv[2])) {

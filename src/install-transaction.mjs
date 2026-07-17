@@ -29,7 +29,6 @@ export const MAX_INSTALL_SOURCE_TREE_DEPTH = 32;
 const SOURCE_ENTRIES = Object.freeze([
   { name: "package.json", type: "file" },
   { name: "src", type: "directory" },
-  { name: "assets", type: "directory" },
   { name: "themes", type: "directory" },
   { name: "scripts", type: "directory" },
   { name: "custom-pet", type: "directory" },
@@ -337,10 +336,11 @@ async function validateOwnedTree(root, expectedManifestSha256 = null) {
   }
   const topLevel = (await readdir(root)).sort();
   const expectedTopLevel = [...SOURCE_ENTRIES.map((entry) => entry.name), INSTALL_MARKER_NAME].sort();
-  if (
-    topLevel.length !== expectedTopLevel.length ||
-    !topLevel.every((name, index) => name === expectedTopLevel[index])
-  ) {
+  const matchesTopLevel = (expected) => (
+    topLevel.length === expected.length &&
+    topLevel.every((name, index) => name === expected[index])
+  );
+  if (!matchesTopLevel(expectedTopLevel)) {
     throw new Error("owned tree contains unexpected top-level content");
   }
   const entries = [];
