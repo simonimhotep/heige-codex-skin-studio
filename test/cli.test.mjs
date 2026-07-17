@@ -1328,6 +1328,76 @@ test("offline disable commits authority and a non-retained native session before
   ]);
 });
 
+test("offline restore on a never-applied install records the disabled choice instead of failing", async () => {
+  // Windows CI 用 -SkipApply 装包后直接点还原：此时没有状态文件，
+  // 还原必须幂等成功并落一条「已关闭」记录，而不是要求用户先去 apply。
+  const events = [];
+  let leaseActive = false;
+  let state = null;
+  let session = null;
+  const result = await offlineDisablePersistence({
+    statePath: "/private/state/state.json",
+    sessionPath: "/private/state/session.json",
+    transitionPath: "/private/state/transition.json",
+    dependencies: {
+      withStateLease: async (_operation, action) => {
+        leaseActive = true;
+        try {
+          return await action({ genuine: true });
+        } finally {
+          leaseActive = false;
+        }
+      },
+      recoverTransition: async () => {
+        assert.equal(leaseActive, true);
+        events.push("transition:recovered");
+      },
+      readState: async () => (state === null ? null : structuredClone(state)),
+      createDisabledState: async (_path, { lease }) => {
+        assert.equal(leaseActive, true);
+        assert.equal(lease?.genuine, true);
+        state = {
+          schemaVersion: 2,
+          persistenceEnabled: false,
+          selectedThemeId: "miku-488137",
+          lastNonNativeThemeId: "miku-488137",
+          controlToken: Buffer.alloc(32, 11).toString("base64url"),
+          lastTransitionNonce: null,
+          revision: 0,
+        };
+        events.push("state:created-disabled");
+        return structuredClone(state);
+      },
+      compareState: async () => {
+        throw new Error("已经是关闭状态时不得改写 revision");
+      },
+      writeSession: async (_path, value) => {
+        assert.equal(leaseActive, true);
+        session = structuredClone(value);
+        events.push("session:native");
+      },
+      newTransitionNonce: () => "offline-disable-nonce",
+      unregisterBackground: async () => {
+        assert.equal(state.persistenceEnabled, false);
+        events.push("background:unregistered");
+      },
+      inspectBackground: async () => {
+        events.push("background:verified");
+        return { registered: false };
+      },
+    },
+  });
+  assert.deepEqual(result, { persistenceEnabled: false, revision: 0 });
+  assert.equal(session.mode, "native");
+  assert.deepEqual(events, [
+    "transition:recovered",
+    "state:created-disabled",
+    "session:native",
+    "background:unregistered",
+    "background:verified",
+  ]);
+});
+
 test("enable-skin from a native process queues only a session apply after verified CDP restart", async () => {
   const fx = lifecycleDeps({
     preflightLifecycle: async (input) => {

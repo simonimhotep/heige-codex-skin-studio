@@ -1907,7 +1907,9 @@ export async function offlineDisablePersistence({
         currentProcess: null,
       });
       let state = await dependencies.readState(statePath);
-      if (state === null) throw new Error("状态文件不存在，请先运行 apply");
+      // 装了但从未 apply 过时本来就是原生外观，还原应当幂等成功并落下「已关闭」，
+      // 不该反过来要求用户先去 apply 才能还原。
+      if (state === null) state = await dependencies.createDisabledState(statePath, { lease });
       if (state.persistenceEnabled === true) {
         const revision = expectedRevision ?? state.revision;
         state = await dependencies.compareState(statePath, {
@@ -2005,6 +2007,10 @@ async function productionOfflineDisable({ paths, platform, port, expectedRevisio
         operation,
       }, action),
       readState: readStudioState,
+      createDisabledState: (path, { lease }) => writeStudioState(path, createDefaultStudioState({
+        themeId: DEFAULT_THEME_ID,
+        token: randomBytes(32).toString("base64url"),
+      }), { lease }),
       compareState: compareAndUpdateStudioState,
       writeSession: writeSessionState,
       recoverTransition: recoverStateTransition,
