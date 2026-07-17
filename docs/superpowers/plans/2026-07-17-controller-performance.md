@@ -132,3 +132,36 @@ Expected: all selected tests pass.
 git add src/cli.mjs test/cli.test.mjs
 git commit -m "perf: compact production lock chains earlier"
 ```
+
+### Task 3: Immediate renderer feedback with durable confirmation
+
+**Files:**
+- Modify: `src/skin-menu.mjs`
+- Modify: `test/skin-menu.dom.test.mjs`
+
+- [ ] **Step 1: Write the failing interaction tests**
+
+Use a deferred theme response and prove that the target CSS is rendered immediately while the compatibility selection remains unchanged. Cover success, controller fallback, revision conflict, and rollback.
+
+- [ ] **Step 2: Run the focused tests and verify RED**
+
+Run: `node --test --test-name-pattern="renders immediately|renderer-blocked theme request" test/skin-menu.dom.test.mjs`
+
+Expected: FAIL because the current renderer waits for the HTTP response before changing CSS.
+
+- [ ] **Step 3: Implement optimistic rendering with rollback**
+
+Apply the target theme only to the current renderer before the request. Keep authoritative state, local selection storage, and cross-window broadcast behind the existing controller acknowledgement. Restore the previous formal, custom, or native theme when the request is rejected, superseded, or times out.
+
+- [ ] **Step 4: Run the menu regression suite**
+
+Run: `node --test test/skin-menu.test.mjs test/skin-menu.dom.test.mjs test/skin-css.test.mjs`
+
+Expected: all selected tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/skin-menu.mjs test/skin-menu.dom.test.mjs
+git commit -m "perf: render theme switches before durable acknowledgement"
+```
