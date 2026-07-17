@@ -4,7 +4,7 @@
 
 HeiGe Codex Skin Studio 通过 Chrome DevTools Protocol（CDP）的 `Runtime.evaluate`，把本仓库生成的 CSS 与菜单脚本注入经过严格识别的 Codex 主窗口 renderer。皮肤工作期间，Codex 以仅监听 `127.0.0.1` 的调试端口启动。这个端口属于无认证的 CDP：能够在同一用户权限下访问该本机端口的其他进程，可能获得与 CDP 相同的页面执行能力。防火墙、回环地址和随机端口不能替代 CDP 自身缺少的认证。
 
-独立控制端点同样只监听 `127.0.0.1`，并要求 256-bit 随机令牌通过 `X-HeiGe-Control-Token` 提交。它只接受一个带版本号的 `persistenceEnabled` 布尔切换，不提供任意命令、文件路径或脚本执行接口。这个令牌用于阻止不知道令牌的本机请求伪造常驻开关，但它不保护无认证的 CDP，也不抵御已经能够读取本用户进程内存或私有状态目录的恶意程序。
+独立控制端点同样只监听 `127.0.0.1`，并要求 256-bit 随机令牌通过 `X-HeiGe-Control-Token` 提交。它只接受带版本号的常驻布尔切换或已验证主题 ID，不提供任意命令、文件路径或脚本执行接口。Codex renderer 的 CSP 阻止访问回环 HTTP 时，菜单会把同形状请求暂存在当前 renderer 内存中；控制器通过已经建立的 CDP 会话读取它，并在同一个状态租约内校验随机 capability、renderer generation、revision、动作和值，然后才允许提交。这个令牌和 capability 用于阻止不知道秘密的本机请求或伪造 renderer 状态改变设置，但它们不保护无认证的 CDP，也不抵御已经能够读取本用户进程内存、renderer 或私有状态目录的恶意程序。
 
 项目不读取 Codex 对话，不读取 API key、Base URL、用户项目文件或其他工作区内容。注入器读取的本地内容限于本仓库主题清单、主题图片、状态文件与完成生命周期操作所需的进程身份信息。
 

@@ -301,10 +301,14 @@ export async function removeSkin({ port, deps = {} }) {
   };
 }
 
-export async function skinStatus({ port, deps = {} }) {
+export async function skinStatus({ port, includeControlRequest = false, deps = {} }) {
+  if (typeof includeControlRequest !== "boolean") {
+    throw new TypeError("includeControlRequest 必须是布尔值");
+  }
   const fetchTargets = deps.fetchRendererTargets ?? fetchRendererTargets;
   const Session = deps.Session ?? CdpSession;
   const expression = `(() => {
+    const includeControlRequest = ${JSON.stringify(includeControlRequest)};
     const installed = Boolean(document.getElementById(${JSON.stringify(STYLE_ID)}));
     const menu = Boolean(document.getElementById(${JSON.stringify(MENU_ID)}));
     let status = null;
@@ -314,12 +318,51 @@ export async function skinStatus({ port, deps = {} }) {
     let themeId = document.documentElement.dataset.heigeCodexSkin ?? null;
     let persistenceEnabled = false;
     let revision = 0;
+    let controlRequest = null;
     try {
       if (typeof status?.generation === "string") generation = status.generation;
       if (status?.mode === "active" || status?.mode === "native") mode = status.mode;
       if (typeof status?.themeId === "string" || status?.themeId === null) themeId = status.themeId;
       persistenceEnabled = status?.persistenceEnabled === true;
       if (Number.isSafeInteger(status?.revision) && status.revision >= 0) revision = status.revision;
+      const request = status?.controlRequest;
+      if (includeControlRequest && request === null) controlRequest = null;
+      if (
+        includeControlRequest &&
+        request !== null &&
+        typeof request === "object" &&
+        !Array.isArray(request)
+      ) {
+        const keys = Object.keys(request).sort();
+        const persistenceKeys = [
+          "action", "capability", "expectedRevision", "persistenceEnabled", "requestId", "schemaVersion"
+        ];
+        const themeKeys = [
+          "action", "capability", "expectedRevision", "requestId", "schemaVersion", "themeId"
+        ];
+        const exact = (expected) =>
+          keys.length === expected.length &&
+          keys.every((key, index) => key === [...expected].sort()[index]);
+        if (request.action === "set-persistence" && exact(persistenceKeys)) {
+          controlRequest = {
+            schemaVersion: request.schemaVersion,
+            requestId: typeof request.requestId === "string" ? request.requestId.slice(0, 128) : null,
+            action: request.action,
+            capability: typeof request.capability === "string" ? request.capability.slice(0, 128) : null,
+            expectedRevision: request.expectedRevision,
+            persistenceEnabled: request.persistenceEnabled
+          };
+        } else if (request.action === "set-theme" && exact(themeKeys)) {
+          controlRequest = {
+            schemaVersion: request.schemaVersion,
+            requestId: typeof request.requestId === "string" ? request.requestId.slice(0, 128) : null,
+            action: request.action,
+            capability: typeof request.capability === "string" ? request.capability.slice(0, 128) : null,
+            expectedRevision: request.expectedRevision,
+            themeId: typeof request.themeId === "string" ? request.themeId.slice(0, 128) : null
+          };
+        }
+      }
     } catch {}
     return {
       installed: installed,
@@ -328,7 +371,8 @@ export async function skinStatus({ port, deps = {} }) {
       themeId,
       menu,
       persistenceEnabled,
-      revision
+      revision,
+      ...(includeControlRequest ? { controlRequest } : {})
     };
   })()`;
   const classified = classifyCodexTargets(await fetchTargets(port));

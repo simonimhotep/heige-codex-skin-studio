@@ -183,16 +183,16 @@ macOS 新 label 使用 `com.heige.codex-skin-controller`。升级时先验证并
 renderer 不能直接写本机文件或调用 launchd。为保证开关真实生效，控制器在当前用户、当前受控 Codex 会话存续期间提供一个极小的本机控制通道：
 
 1. 只绑定随机分配的 `127.0.0.1` 端口，不绑定 `0.0.0.0`、IPv6 通配或局域网地址。
-2. 只实现 `POST /v1/persistence` 和必要的 CORS 预检，不提供文件、命令或任意参数执行接口。
-3. 请求必须携带随机安装 token、当前 revision 和布尔目标状态。
+2. 只实现 `POST /v1/persistence`、`POST /v1/theme` 和必要的 CORS 预检，不提供文件、命令或任意参数执行接口。
+3. 请求必须携带随机安装 token、当前 revision，以及布尔目标状态或已验证主题 ID。
 4. 校验 Host、Origin、Content-Type、Content-Length、token 和 JSON 形状。
 5. 请求体设置很小的硬上限，超时和连接数有限制。
 6. 响应只有新状态、revision 和可显示错误，不返回本机路径、日志或环境变量。
 7. 关闭常驻并结束当前 Codex 会话后，控制通道随控制器一起消失。
 
-控制器把本次随机端口、token 和 revision 作为只读配置注入菜单。token 在 renderer 中只能保护控制通道免受普通网页跨站请求，不能抵抗已经取得同一 Codex renderer 或本机用户权限的代码。因为接口只能切换一个布尔状态，不允许执行命令或读文件，所以即使 token 边界失效，影响仍被限制在启停本工具。
+控制器把本次随机端口、token、revision 和 renderer generation 作为只读配置注入菜单。token 在 renderer 中只能保护控制通道免受普通网页跨站请求，不能抵抗已经取得同一 Codex renderer 或本机用户权限的代码。因为接口只能切换一个布尔状态或选择已验证主题，不允许执行命令或读文件，所以即使 token 边界失效，影响仍被限制在本工具设置内。
 
-不采用浏览器轮询本地文件，也不采用「菜单先写 localStorage，后台 15 秒后再猜」的方案。它们无法给出可靠确认，用户快速退出时会产生假关闭。
+Codex renderer 的 CSP 可能阻止页面向回环 HTTP 发起请求。HTTP 失败后，菜单只在当前 renderer 内存中排队一个有时限、带随机 request ID 的同形状请求，不乐观改变界面。长期控制器通过既有 CDP 会话轮询 renderer 状态；它只在同一个状态租约内验证 capability、renderer generation、revision、动作和值，拒绝多 renderer 冲突和过期请求。提交成功后，控制器重注入权威状态作为 ACK，菜单此时才更新开关或主题。公开 `status` 默认隐藏该请求，`localStorage` 不参与常驻状态提交。
 
 ### 6.3 进程与应用解析
 

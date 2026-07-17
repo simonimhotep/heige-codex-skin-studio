@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { CODEX_RENDERER_ORIGIN, NATIVE_THEME_ID } from "./constants.mjs";
 import { sameProcessIdentity } from "./codex-app.mjs";
@@ -17,6 +17,7 @@ import { startControlServer as startLoopbackControlServer } from "./control-serv
 
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const RENDERER_GENERATION = /^[a-f0-9]{32}$/;
+const MENU_REQUEST_ID = /^[a-f0-9]{32}$/;
 const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LOCAL_CUSTOM_THEME_ID = "custom-upload";
 const ACTIONS = new Set([
@@ -48,6 +49,126 @@ class ControllerTransitionError extends Error {
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value, expected) {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  return keys.length === sorted.length &&
+    keys.every((key, index) => key === sorted[index]);
+}
+
+function sameControlCapability(actual, expected) {
+  if (
+    typeof actual !== "string" ||
+    !CONTROL_TOKEN.test(actual) ||
+    typeof expected !== "string" ||
+    !CONTROL_TOKEN.test(expected)
+  ) return false;
+  const actualBytes = Buffer.from(actual, "base64url");
+  const expectedBytes = Buffer.from(expected, "base64url");
+  return actualBytes.length === 32 &&
+    expectedBytes.length === 32 &&
+    actualBytes.toString("base64url") === actual &&
+    expectedBytes.toString("base64url") === expected &&
+    timingSafeEqual(actualBytes, expectedBytes);
+}
+
+function normalizedRendererControlRequest(status) {
+  if (
+    !isRecord(status) ||
+    status.installed !== true ||
+    status.menu !== true ||
+    typeof status.generation !== "string" ||
+    !RENDERER_GENERATION.test(status.generation) ||
+    !Number.isSafeInteger(status.revision) ||
+    status.revision < 0
+  ) return undefined;
+  const request = status.controlRequest;
+  if (request === null || request === undefined) return null;
+  if (
+    !isRecord(request) ||
+    request.schemaVersion !== 1 ||
+    typeof request.requestId !== "string" ||
+    !MENU_REQUEST_ID.test(request.requestId) ||
+    request.expectedRevision !== status.revision
+  ) return undefined;
+  if (request.action === "set-persistence") {
+    if (
+      !hasExactKeys(request, [
+        "action",
+        "capability",
+        "expectedRevision",
+        "persistenceEnabled",
+        "requestId",
+        "schemaVersion",
+      ]) ||
+      typeof request.capability !== "string" ||
+      !CONTROL_TOKEN.test(request.capability) ||
+      typeof request.persistenceEnabled !== "boolean"
+    ) return undefined;
+    return { ...request };
+  }
+  if (request.action === "set-theme") {
+    if (
+      !hasExactKeys(request, [
+        "action",
+        "capability",
+        "expectedRevision",
+        "requestId",
+        "schemaVersion",
+        "themeId",
+      ]) ||
+      typeof request.capability !== "string" ||
+      !CONTROL_TOKEN.test(request.capability) ||
+      !(
+        request.themeId === NATIVE_THEME_ID ||
+        (
+          typeof request.themeId === "string" &&
+          request.themeId !== LOCAL_CUSTOM_THEME_ID &&
+          THEME_ID.test(request.themeId)
+        )
+      )
+    ) return undefined;
+    return { ...request };
+  }
+  return undefined;
+}
+
+function pendingRendererControlRequest(health) {
+  if (!isRecord(health)) return null;
+  let statuses;
+  if (isRecord(health.results)) {
+    const succeeded = health.results.succeeded;
+    const failed = health.results.failed;
+    if (
+      !Array.isArray(succeeded) ||
+      succeeded.length === 0 ||
+      !Array.isArray(failed) ||
+      failed.length !== 0
+    ) return null;
+    const seen = new Set();
+    statuses = succeeded.map((entry) => {
+      rendererId(entry, seen);
+      return entry?.value;
+    });
+  } else {
+    if (
+      !Array.isArray(health.statuses) ||
+      health.statuses.length === 0 ||
+      (Array.isArray(health.failed) && health.failed.length !== 0)
+    ) return null;
+    statuses = health.statuses;
+  }
+  const requests = statuses.map(normalizedRendererControlRequest);
+  if (requests.some((request) => request === undefined)) return null;
+  const pending = requests.filter((request) => request !== null);
+  if (pending.length === 0) return null;
+  const expected = JSON.stringify(pending[0]);
+  return pending.every((request) => JSON.stringify(request) === expected)
+    ? pending[0]
+    : null;
 }
 
 function exactProcessIdentity(value) {
@@ -308,54 +429,6 @@ function rendererStatusIsHealthy(value, state) {
   }
 }
 
-function rendererStatusSelection(value, state) {
-  if (!isRecord(value)) return null;
-  try {
-    if (
-      value.installed !== true ||
-      typeof value.generation !== "string" ||
-      !RENDERER_GENERATION.test(value.generation) ||
-      value.menu !== true ||
-      value.persistenceEnabled !== state.persistenceEnabled ||
-      value.revision !== state.revision
-    ) {
-      return null;
-    }
-    if (value.mode === "native" && (value.themeId === null || value.themeId === NATIVE_THEME_ID)) {
-      return NATIVE_THEME_ID;
-    }
-    if (value.mode === "active" && typeof value.themeId === "string" && value.themeId.length > 0) {
-      return value.themeId;
-    }
-  } catch {}
-  return null;
-}
-
-function unanimousRendererSelection(health, state) {
-  if (!isRecord(health)) return null;
-  let statuses;
-  try {
-    const succeeded = health.results?.succeeded;
-    const failed = health.results?.failed;
-    if (Array.isArray(succeeded) && Array.isArray(failed)) {
-      if (succeeded.length === 0 || failed.length !== 0) return null;
-      statuses = succeeded.map((entry) => entry?.value);
-    } else if (Array.isArray(health.statuses)) {
-      if (health.statuses.length === 0 || (Array.isArray(health.failed) && health.failed.length !== 0)) {
-        return null;
-      }
-      statuses = health.statuses;
-    } else {
-      return null;
-    }
-  } catch {
-    return null;
-  }
-  const selections = statuses.map((value) => rendererStatusSelection(value, state));
-  if (selections.some((value) => value === null)) return null;
-  return selections.every((value) => value === selections[0]) ? selections[0] : null;
-}
-
 function rendererId(entry, seen) {
   let id;
   try { id = entry?.id; } catch { throw new Error("renderer status ID is unreadable"); }
@@ -476,7 +549,10 @@ export function createSkinController(input) {
 
   let setPersistencePublic;
   let setPersistenceFromMenu;
+  let setPersistenceFromRenderer;
   let setThemeSelectionPublic;
+  let setThemeSelectionFromRenderer;
+  let processRendererRequest;
 
   const ensureServer = async (state) => {
     const started = server === null;
@@ -693,7 +769,13 @@ export function createSkinController(input) {
     return current;
   };
 
-  const reconcile = async ({ lease, recovered = false, includeHealthCount = false }) => {
+  const reconcile = async ({
+    lease,
+    recovered = false,
+    includeHealthCount = false,
+    forceRepair = false,
+    preferStored,
+  }) => {
     let state = validateControlState(await deps.readState());
     lastKnownState = state;
     let session = await deps.readSession();
@@ -748,7 +830,12 @@ export function createSkinController(input) {
       healthyTargets: [],
       repairTargets: null,
     };
-    if (action === "repair" && !serverStarted && typeof deps.inspectSkin === "function") {
+    if (
+      action === "repair" &&
+      !forceRepair &&
+      !serverStarted &&
+      typeof deps.inspectSkin === "function"
+    ) {
       let health;
       try {
         health = await deps.inspectSkin({
@@ -767,38 +854,6 @@ export function createSkinController(input) {
         health = { results: failedResults };
       }
       targetHealth = analyzeRendererHealth(health, state);
-      const observedSelection = unanimousRendererSelection(health, state);
-      if (
-        observedSelection !== null &&
-        observedSelection !== state.selectedThemeId &&
-        (
-          observedSelection === NATIVE_THEME_ID ||
-          await deps.validateThemeSelection(observedSelection) === true
-        )
-      ) {
-        state = validateControlState(await deps.compareAndUpdate({
-          expectedRevision: state.revision,
-          mutate: (current) => ({
-            ...current,
-            selectedThemeId: observedSelection,
-            ...(observedSelection === NATIVE_THEME_ID
-              ? {}
-              : { lastNonNativeThemeId: observedSelection }),
-          }),
-        }, lease));
-        lastKnownState = state;
-        session = sessionForState(state, processIdentity, {
-          keepUntilProcessExit: !state.persistenceEnabled,
-        });
-        await deps.writeSession(session, lease);
-        expectedMode = state.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
-        ({ control } = await ensureServer(state));
-        targetHealth = {
-          selective: false,
-          healthyTargets: [],
-          repairTargets: null,
-        };
-      }
       if (targetHealth.repairTargets?.length === 0) {
         consecutiveFailures = 0;
         return result("idle", expectedMode, state, includeHealthCount
@@ -820,6 +875,7 @@ export function createSkinController(input) {
       process: processIdentity,
       control,
       ...(selectiveTargets === null ? {} : { targetIds: selectiveTargets }),
+      ...(typeof preferStored === "boolean" ? { preferStored } : {}),
     });
     consecutiveFailures = 0;
     session = sessionForState(state, processIdentity, {
@@ -870,10 +926,26 @@ export function createSkinController(input) {
     return reconcile({ lease, recovered: recovered?.recovered === true });
   }, { startupHandshake });
 
-  const tick = () => {
+  const tick = async () => {
+    if (stopped) return result("error", "error", lastKnownState);
     if (handoffRequested && !deps.backgroundProcess) {
       const mode = lastKnownState?.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
-      return Promise.resolve(result("handoff", mode, lastKnownState));
+      return result("handoff", mode, lastKnownState);
+    }
+    if (
+      typeof deps.inspectSkin === "function" &&
+      typeof processRendererRequest === "function"
+    ) {
+      let request = null;
+      try {
+        request = pendingRendererControlRequest(await deps.inspectSkin({
+          purpose: "renderer-control-request",
+        }));
+      } catch {}
+      if (request !== null) {
+        const handled = await processRendererRequest(request);
+        if (handled !== null) return handled;
+      }
     }
     return runSafe(
       "controller:tick",
@@ -887,7 +959,7 @@ export function createSkinController(input) {
     enabled,
     includeProcessIdentity = false,
     signal,
-  } = {}, { menuCapability = false } = {}) => {
+  } = {}, { menuCapability = false, rendererCapability = null } = {}) => {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       throw new Error("expectedRevision must be a non-negative safe integer");
     }
@@ -899,6 +971,12 @@ export function createSkinController(input) {
       const changed = await deps.withLease("controller:set-persistence", async (lease) => {
         const state = validateControlState(await deps.readState());
         lastKnownState = state;
+        if (
+          rendererCapability !== null &&
+          !sameControlCapability(rendererCapability, state.controlToken)
+        ) {
+          throw new Error("renderer control capability is invalid");
+        }
         if (
           enabled &&
           !state.persistenceEnabled &&
@@ -956,6 +1034,20 @@ export function createSkinController(input) {
           transitionNonce: changed.state.lastTransitionNonce,
         });
         if (isRecord(inspected) && inspected.loaded === true) return publicState(changed.state);
+      }
+
+      if (deps.backgroundProcess) {
+        const finalized = await deps.withLease("controller:finalize-enable", (lease) =>
+          finalizeEnableTransition({
+            lease,
+            expectedRevision,
+            nonce: enableAttempt.nonce,
+            journal: changed.journal,
+          }), {
+          desiredPersistenceEnabled: true,
+          expectedRevision: changed.state.revision,
+        });
+        return publicState(finalized);
       }
 
       const registration = await deps.registerBackground({
@@ -1098,8 +1190,16 @@ export function createSkinController(input) {
 
   setPersistencePublic = (request) => setPersistence(request);
   setPersistenceFromMenu = (request) => setPersistence(request, { menuCapability: true });
+  setPersistenceFromRenderer = (request) => setPersistence(request, {
+    menuCapability: true,
+    rendererCapability: request.capability,
+  });
 
-  setThemeSelectionPublic = async ({ expectedRevision, themeId, signal } = {}) => {
+  const setThemeSelection = async ({
+    expectedRevision,
+    themeId,
+    signal,
+  } = {}, { rendererCapability = null } = {}) => {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       throw new Error("expectedRevision must be a non-negative safe integer");
     }
@@ -1117,6 +1217,12 @@ export function createSkinController(input) {
     return deps.withLease("controller:set-theme-selection", async (lease) => {
       const state = validateControlState(await deps.readState());
       lastKnownState = state;
+      if (
+        rendererCapability !== null &&
+        !sameControlCapability(rendererCapability, state.controlToken)
+      ) {
+        throw new Error("renderer control capability is invalid");
+      }
       if (state.selectedThemeId === themeId) return publicThemeState(state);
       if (state.revision !== expectedRevision) throw new ControllerTransitionError(
         "REVISION_CONFLICT",
@@ -1148,6 +1254,48 @@ export function createSkinController(input) {
       }
       return publicThemeState(updated);
     });
+  };
+  setThemeSelectionPublic = (request) => setThemeSelection(request);
+  setThemeSelectionFromRenderer = (request) => setThemeSelection(request, {
+    rendererCapability: request.capability,
+  });
+
+  processRendererRequest = async (request) => {
+    try {
+      if (request.action === "set-persistence") {
+        await setPersistenceFromRenderer({
+          expectedRevision: request.expectedRevision,
+          enabled: request.persistenceEnabled,
+          capability: request.capability,
+        });
+        if (
+          !deps.backgroundProcess &&
+          request.persistenceEnabled
+        ) {
+          const mode = lastKnownState?.selectedThemeId === NATIVE_THEME_ID ? "native" : "active";
+          return result("handoff", mode, lastKnownState);
+        }
+      } else {
+        await setThemeSelectionFromRenderer({
+          expectedRevision: request.expectedRevision,
+          themeId: request.themeId,
+          capability: request.capability,
+        });
+      }
+      return runSafe(
+        "controller:ack-renderer-request",
+        (lease) => reconcile({
+          lease,
+          includeHealthCount: true,
+          forceRepair: true,
+          ...(request.action === "set-theme" ? { preferStored: false } : {}),
+        }),
+        { includeHealthCount: true },
+      );
+    } catch (error) {
+      await safeLog(deps.logger, "warn", "renderer_control_request_failed", error);
+      return null;
+    }
   };
 
   const pause = async () => deps.withLease("controller:pause", async (lease) => {

@@ -190,7 +190,7 @@ const assertCurrent = () => {
 };
 ```
 
-Expose `window.__heigeCodexSkinRuntime.status()` returning only `{ generation, themeId, menu, mode, persistenceEnabled, revision }`. `removeSkin` invokes `dispose` before removing fallback nodes and globals. No old closure may write style, dataset, localStorage, alerts, or backend requests after disposal.
+Expose `window.__heigeCodexSkinRuntime.status()` returning `{ generation, themeId, menu, mode, persistenceEnabled, revision }` by default. A controller-only call with the injected control capability may additionally return the single bounded in-memory `controlRequest`; public status and ordinary inspection must omit it. `removeSkin` invokes `dispose` before removing fallback nodes and globals. No old closure may write style, dataset, localStorage, alerts, or backend requests after disposal.
 
 - [ ] **Step 4: Verify GREEN**
 

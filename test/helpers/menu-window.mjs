@@ -52,6 +52,9 @@ export async function menuWindow({
   persistenceEnabled = true,
   revision = 7,
   BroadcastChannelClass,
+  activeId = "miku-488137",
+  preferStored = false,
+  initialStorage = {},
   entries = [{
     id: "miku-488137",
     name: "Miku 488137",
@@ -81,10 +84,14 @@ export async function menuWindow({
     });
   });
   if (BroadcastChannelClass) window.BroadcastChannel = BroadcastChannelClass;
+  for (const [key, value] of Object.entries(initialStorage)) {
+    window.localStorage.setItem(key, value);
+  }
   const buildOptions = {
     styleId: "heige-codex-skin-style",
     menuId: "heige-codex-skin-menu",
-    activeId: "miku-488137",
+    activeId,
+    preferStored,
     entries,
     control: {
       available: true,

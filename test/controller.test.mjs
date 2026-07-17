@@ -691,7 +691,260 @@ function rendererStatus(overrides = {}) {
   };
 }
 
-test("a unanimous menu theme change becomes the authoritative last non-native theme", async () => {
+function rendererRequestHealth(request, overrides = {}) {
+  const value = rendererStatus({
+    controlRequest: request,
+    ...overrides,
+  });
+  return {
+    statuses: [value],
+    failed: [],
+    results: {
+      succeeded: [{ id: "main", value }],
+      failed: [],
+      skipped: [],
+    },
+  };
+}
+
+test("a polled menu request disables persistence and reinjects the current session ACK", async () => {
+  const fx = fixture({ backgroundProcess: true });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "b".repeat(32),
+    action: "set-persistence",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    persistenceEnabled: false,
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "repair");
+  assert.equal(result.persistenceEnabled, false);
+  assert.equal(result.revision, 2);
+  assert.equal(fx.state.persistenceEnabled, false);
+  assert.equal(fx.session.keepUntilProcessExit, true);
+  assert.equal(fx.calls.unregister.length, 0);
+  assert.equal(fx.calls.inject.length, 2);
+});
+
+test("the retained background controller re-enables persistence without restarting itself", async () => {
+  const fx = fixture({ backgroundProcess: true });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "b".repeat(32),
+    action: "set-persistence",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    persistenceEnabled: false,
+  }));
+  const disabled = await controller.tick();
+  assert.equal(disabled.persistenceEnabled, false);
+  assert.equal(disabled.revision, 2);
+
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "c".repeat(32),
+    action: "set-persistence",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 2,
+    persistenceEnabled: true,
+  }, {
+    persistenceEnabled: false,
+    revision: 2,
+  }));
+  const enabled = await controller.tick();
+
+  assert.equal(enabled.action, "repair");
+  assert.equal(enabled.persistenceEnabled, true);
+  assert.equal(enabled.revision, 3);
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.session.keepUntilProcessExit, false);
+  assert.equal(fx.backgroundRegistered, true);
+  assert.equal(fx.calls.unregister.length, 0);
+  assert.equal(fx.calls.register.length, 0);
+  assert.equal(fx.calls.wake.length, 0);
+  assert.equal(fx.calls.handshake.length, 0);
+});
+
+test("a polled menu request is the only non-internal path that can re-enable persistence", async () => {
+  const fx = fixture({
+    state: { persistenceEnabled: false, revision: 1 },
+    session: activeSession({ keepUntilProcessExit: true }),
+    backgroundRegistered: false,
+    allowInternalPersistenceEnable: false,
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "c".repeat(32),
+    action: "set-persistence",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    persistenceEnabled: true,
+  }, {
+    persistenceEnabled: false,
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "handoff");
+  assert.equal(result.persistenceEnabled, true);
+  assert.equal(result.revision, 2);
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.calls.register.length, 1);
+  assert.equal(fx.calls.wake.length, 1);
+  assert.equal(fx.calls.handshake.length, 1);
+});
+
+test("a polled menu theme request commits and reinjects the authoritative selection", async () => {
+  const selected = "genshin-night";
+  const fx = fixture({
+    validateThemeSelection: async (themeId) => themeId === selected,
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "d".repeat(32),
+    action: "set-theme",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    themeId: selected,
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "repair");
+  assert.equal(result.revision, 2);
+  assert.equal(fx.state.selectedThemeId, selected);
+  assert.equal(fx.state.lastNonNativeThemeId, selected);
+  assert.equal(fx.calls.inject.at(-1).themeId, selected);
+  assert.equal(fx.calls.inject.at(-1).preferStored, false);
+});
+
+test("an idempotent polled theme request replaces a local quick image with the formal selection", async () => {
+  const fx = fixture();
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "9".repeat(32),
+    action: "set-theme",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    themeId: DEFAULT_THEME_ID,
+  }, {
+    themeId: "custom-upload",
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "repair");
+  assert.equal(result.revision, 1);
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.calls.inject.length, 2);
+  assert.equal(fx.calls.inject.at(-1).themeId, DEFAULT_THEME_ID);
+  assert.equal(fx.calls.inject.at(-1).preferStored, false);
+});
+
+test("a polled menu request with the wrong capability cannot mutate state", async () => {
+  const fx = fixture({ backgroundProcess: true });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "e".repeat(32),
+    action: "set-persistence",
+    capability: Buffer.alloc(32, 9).toString("base64url"),
+    expectedRevision: 1,
+    persistenceEnabled: false,
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.transition, null);
+  assert.equal(fx.calls.logs.at(-1).event, "renderer_control_request_failed");
+});
+
+test("a non-canonical base64url alias of the control capability is rejected", async () => {
+  const fx = fixture({ backgroundProcess: true });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+  fx.setHealth(rendererRequestHealth({
+    schemaVersion: 1,
+    requestId: "8".repeat(32),
+    action: "set-persistence",
+    capability: `${CONTROL_TOKEN.slice(0, -1)}Z`,
+    expectedRevision: 1,
+    persistenceEnabled: false,
+  }));
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.transition, null);
+  assert.equal(fx.calls.logs.at(-1).event, "renderer_control_request_failed");
+});
+
+test("conflicting requests from multiple renderers fail closed without choosing a winner", async () => {
+  const disable = {
+    schemaVersion: 1,
+    requestId: "f".repeat(32),
+    action: "set-persistence",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    persistenceEnabled: false,
+  };
+  const theme = {
+    schemaVersion: 1,
+    requestId: "a".repeat(32),
+    action: "set-theme",
+    capability: CONTROL_TOKEN,
+    expectedRevision: 1,
+    themeId: "genshin-night",
+  };
+  const left = rendererStatus({ controlRequest: disable });
+  const right = rendererStatus({ controlRequest: theme });
+  const fx = fixture({
+    backgroundProcess: true,
+    health: {
+      statuses: [left, right],
+      failed: [],
+      results: {
+        succeeded: [
+          { id: "left", value: left },
+          { id: "right", value: right },
+        ],
+        failed: [],
+        skipped: [],
+      },
+    },
+  });
+  const controller = createSkinController(fx.deps);
+  await controller.start();
+
+  const result = await controller.tick();
+
+  assert.equal(result.action, "idle");
+  assert.equal(fx.state.persistenceEnabled, true);
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.transition, null);
+});
+
+test("a divergent formal renderer is repaired from authoritative state without a reverse CAS", async () => {
   const selected = "genshin-night";
   const fx = fixture({
     validateThemeSelection: async (themeId) => themeId === selected,
@@ -711,15 +964,15 @@ test("a unanimous menu theme change becomes the authoritative last non-native th
   const result = await controller.tick();
 
   assert.equal(result.action, "repair");
-  assert.equal(fx.state.selectedThemeId, selected);
-  assert.equal(fx.state.lastNonNativeThemeId, selected);
-  assert.equal(fx.state.revision, 2);
-  assert.equal(fx.session.activeThemeId, selected);
-  assert.equal(fx.calls.inject.at(-1).themeId, selected);
-  assert.equal(fx.calls.inject.at(-1).control.revision, 2);
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.state.lastNonNativeThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.session.activeThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.calls.inject.at(-1).themeId, DEFAULT_THEME_ID);
+  assert.equal(fx.calls.inject.at(-1).control.revision, 1);
 });
 
-test("a unanimous native menu choice preserves the last non-native launcher theme", async () => {
+test("a divergent native renderer is repaired without changing the formal selection", async () => {
   const lastNonNativeThemeId = "genshin-night";
   const fx = fixture({
     state: { lastNonNativeThemeId },
@@ -739,13 +992,13 @@ test("a unanimous native menu choice preserves the last non-native launcher them
 
   const result = await controller.tick();
 
-  assert.equal(result.mode, "native");
-  assert.equal(fx.state.selectedThemeId, NATIVE_THEME_ID);
+  assert.equal(result.mode, "active");
+  assert.equal(fx.state.selectedThemeId, DEFAULT_THEME_ID);
   assert.equal(fx.state.lastNonNativeThemeId, lastNonNativeThemeId);
-  assert.equal(fx.state.revision, 2);
-  assert.equal(fx.session.mode, "native");
-  assert.equal(fx.session.activeThemeId, null);
-  assert.equal(fx.calls.inject.at(-1).themeId, NATIVE_THEME_ID);
+  assert.equal(fx.state.revision, 1);
+  assert.equal(fx.session.mode, "active");
+  assert.equal(fx.session.activeThemeId, DEFAULT_THEME_ID);
+  assert.equal(fx.calls.inject.at(-1).themeId, DEFAULT_THEME_ID);
 });
 
 test("the menu theme endpoint commits a verified selection before acknowledging it", async () => {

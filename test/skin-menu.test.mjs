@@ -91,14 +91,14 @@ test("rejects empty menus and unknown active themes", () => {
   );
 });
 
-test("persists the user's selection and restores it over the CLI activeId", () => {
+test("keeps local selection metadata for compatibility events and quick images", () => {
   const script = buildSkinMenuScript({
     ...base,
     activeId: "a",
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
   });
   assert.match(script, /heigeCodexSkinSelected/, "selection key must ship");
-  assert.match(script, /readSelected\(\)/, "restore must read persisted selection");
+  assert.match(script, /readSelected\(\)/, "quick-image restore must read persisted selection");
   assert.match(script, /writeSelected/, "picks must persist");
 });
 
@@ -122,12 +122,12 @@ test("clamps degenerate upload dimensions and reports failures", () => {
   assert.match(script, /reader\.onerror/, "file read errors must be handled");
 });
 
-test("preferStored restores selection only when asked, else activeId wins", () => {
+test("preferStored is encoded only for background quick-image recovery", () => {
   const stored = buildSkinMenuScript({
     ...base, activeId: "a", preferStored: true,
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
   });
-  assert.match(stored, /"preferStored":true/, "watchdog path must prefer stored selection");
+  assert.match(stored, /"preferStored":true/, "background repair may restore a local quick image");
   const explicit = buildSkinMenuScript({
     ...base, activeId: "a",
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],

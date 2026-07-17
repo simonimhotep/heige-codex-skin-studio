@@ -300,7 +300,7 @@ export function buildSkinMenuScript({
     return item;
   };
 
-  // 选中态持久化：重新注入（含看门狗补针）后恢复用户上次选的主题，而不是硬切回 activeId
+  // 正式主题由 controller state 决定。localStorage 只保留本机快捷图片与兼容事件。
   const writeSelected = (id) => { assertCurrent(); try { localStorage.setItem(data.selectedKey, id); } catch {} };
   const readSelected = () => { assertCurrent(); try { return localStorage.getItem(data.selectedKey); } catch { return null; } };
   // 卸载皮肤后 style 已脱离 DOM，任何脚本化调用不得再改 dataset/写存储，否则污染 status
@@ -842,6 +842,7 @@ export function buildSkinMenuScript({
   // ---- 常驻开关：只显示控制器确认的真实状态，不使用 localStorage 伪造持久化 ----
   let getPersistenceState = () => null;
   let applyRemotePersistence = () => false;
+  let controlRequest = null;
   if (data.control?.available === true) {
     const section = document.createElement("section");
     section.dataset.heigeRole = "persistence-section";
@@ -922,7 +923,13 @@ export function buildSkinMenuScript({
     let controlRevision = data.control.revision;
     let pending = false;
     let themePending = false;
+    let controlRequestTimeout = null;
     const themeEndpoint = data.control.endpoint.slice(0, -"/v1/persistence".length) + "/v1/theme";
+    const newRequestId = () => {
+      const bytes = new Uint8Array(16);
+      globalThis.crypto.getRandomValues(bytes);
+      return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+    };
 
     const closeConfirmation = ({ restoreFocus = false } = {}) => {
       assertCurrent();
@@ -966,6 +973,32 @@ export function buildSkinMenuScript({
       detail = detail.replace(/[\\r\\n\\t]+/g, " ").slice(0, 160);
       return detail.includes("控制器不可用") ? detail : "控制器不可用：" + detail;
     };
+    const clearControlRequest = () => {
+      const cleared = controlRequest;
+      if (controlRequestTimeout !== null) clearLater(controlRequestTimeout);
+      controlRequestTimeout = null;
+      controlRequest = null;
+      return cleared;
+    };
+    const queueControlRequest = (request) => {
+      if (controlRequest !== null) return false;
+      controlRequest = request;
+      controlRequestTimeout = later(() => {
+        if (controlRequest?.requestId !== request.requestId) return;
+        clearControlRequest();
+        if (request.action === "set-persistence") {
+          pending = false;
+          closeConfirmation({ restoreFocus: true });
+          paintPersistence();
+        } else {
+          themePending = false;
+          for (const item of rows.values()) item.disabled = false;
+        }
+        showAlert("后台控制器未确认，请重试");
+      }, 15000);
+      showAlert("正在等待后台确认…", "success");
+      return true;
+    };
     const isRevision = (value) => Number.isSafeInteger(value) && value >= 0;
     requestThemeSelection = async (themeId) => {
       assertCurrent();
@@ -976,7 +1009,16 @@ export function buildSkinMenuScript({
         !data.themes.some((theme) => theme.id === themeId)
       ) return false;
       const requestRevision = controlRevision;
+      const fallbackRequest = {
+        schemaVersion: 1,
+        requestId: newRequestId(),
+        action: "set-theme",
+        capability: data.control.token,
+        expectedRevision: requestRevision,
+        themeId,
+      };
       themePending = true;
+      let queued = false;
       hideAlert();
       for (const item of rows.values()) item.disabled = true;
       const abortController = childController();
@@ -1032,14 +1074,19 @@ export function buildSkinMenuScript({
         showAlert("主题选择已保存。", "success");
         return true;
       } catch (error) {
-        if (isCurrent()) showAlert(safeClientError(error));
+        if (isCurrent()) {
+          queued = queueControlRequest(fallbackRequest);
+          if (!queued) showAlert(safeClientError(error));
+        }
         return false;
       } finally {
         clearLater(timeoutId);
         trackedControllers.delete(abortController);
         if (isCurrent()) {
-          themePending = false;
-          for (const item of rows.values()) item.disabled = false;
+          if (!queued) {
+            themePending = false;
+            for (const item of rows.values()) item.disabled = false;
+          }
         }
       }
     };
@@ -1048,7 +1095,16 @@ export function buildSkinMenuScript({
       if (pending || target === persistenceEnabled) return;
       const previousEnabled = persistenceEnabled;
       const requestRevision = controlRevision;
+      const fallbackRequest = {
+        schemaVersion: 1,
+        requestId: newRequestId(),
+        action: "set-persistence",
+        capability: data.control.token,
+        expectedRevision: requestRevision,
+        persistenceEnabled: target,
+      };
       pending = true;
+      let queued = false;
       if (!target && !confirmation.hidden) {
         confirmation.setAttribute("aria-busy", "true");
         cancel.setAttribute("aria-disabled", "true");
@@ -1109,12 +1165,17 @@ export function buildSkinMenuScript({
         }
       } catch (error) {
         if (!isCurrent()) return;
-        showAlert(error?.message?.includes("后台响应无效") ? error.message : safeClientError(error));
+        if (error?.message?.includes("后台响应无效")) {
+          showAlert(error.message);
+        } else {
+          queued = queueControlRequest(fallbackRequest);
+          if (!queued) showAlert(safeClientError(error));
+        }
       } finally {
         clearLater(timeoutId);
         trackedControllers.delete(abortController);
         if (!isCurrent()) return;
-        pending = false;
+        if (!queued) pending = false;
         paintPersistence();
         if (restoreFocus) closeConfirmation({ restoreFocus: true });
       }
@@ -1122,6 +1183,12 @@ export function buildSkinMenuScript({
     applyRemotePersistence = (value) => {
       assertCurrent();
       if (value.revision <= controlRevision) return false;
+      const cleared = clearControlRequest();
+      if (cleared?.action === "set-persistence") pending = false;
+      if (cleared?.action === "set-theme") {
+        themePending = false;
+        for (const item of rows.values()) item.disabled = false;
+      }
       closeConfirmation({ restoreFocus: !confirmation.hidden });
       persistenceEnabled = value.enabled;
       controlRevision = value.revision;
@@ -1282,17 +1349,15 @@ export function buildSkinMenuScript({
 
   root.append(button, panel, picker);
   document.body.appendChild(root);
-  // preferStored=true（看门狗自动补针/重开）：恢复用户上次的选择，不覆盖。persist=false 不反写。
-  // preferStored=false（用户显式 apply/customize）：activeId 当场生效并记为新选择（persist=true）。
+  // 自动补针只允许恢复不进入正式 state 的本机快捷图片。
+  // 正式主题与原生界面始终服从 controller 传入的 activeId。
   const restore = () => {
     if (data.preferStored) {
       const sel = readSelected();
-      if (sel === data.nativeSel) { clearTheme(false, false); return; }
       if (sel === data.customId) {
         const custom = currentCustom ?? loadCustom();
         if (custom) { applyCustomTheme(custom, false, false); return; }
       }
-      if (sel && data.themes.some((t) => t.id === sel)) { setTheme(sel, false, false); return; }
     }
     if (data.activeId === null) clearTheme(true, false);
     else setTheme(data.activeId, true, false);
@@ -1312,6 +1377,7 @@ export function buildSkinMenuScript({
       mode: themeId === null ? "native" : "active",
       persistenceEnabled: persistence?.persistenceEnabled ?? false,
       revision: persistence?.revision ?? 0,
+      controlRequest: controlRequest === null ? null : { ...controlRequest },
     };
   };
   window.__heigeCodexSkin = { generation, importFromDataUrl, setTheme, clearTheme, deleteCustom, setHidden, getPersistenceState };

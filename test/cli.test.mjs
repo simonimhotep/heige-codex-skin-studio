@@ -385,7 +385,7 @@ test("apply validates everything and registers only an ephemeral current-session
   assert.equal(fx.state.persistenceEnabled, false);
 });
 
-test("explicit apply ignores an older renderer theme while background repair may reuse it", () => {
+test("explicit apply ignores local preference while background repair may reuse a quick image", () => {
   assert.equal(controllerInjectionPreference({ ephemeral: true }), false);
   assert.equal(controllerInjectionPreference({ ephemeral: false }), true);
   assert.equal(controllerInjectionPreference({ ephemeral: false, preferStored: false }), false);

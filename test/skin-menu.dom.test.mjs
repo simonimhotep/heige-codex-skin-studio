@@ -332,12 +332,27 @@ test("cancel keeps persistence on without contacting the controller", async (t) 
   assert.equal(calls, 0);
 });
 
-test("network failure rolls back and shows a safe real error", async (t) => {
-  const page = await menuWindow({ fetch: async () => { throw new Error("控制器不可用"); } });
+test("a renderer-blocked request is queued for the controller poll without painting an ACK", async (t) => {
+  const page = await menuWindow({ fetch: async () => { throw new Error("Failed to fetch"); } });
   t.after(() => page.close());
   await page.disablePersistence();
   assert.equal(page.switch.getAttribute("aria-checked"), "true");
-  assert.match(page.alert.textContent, /控制器不可用/);
+  assert.equal(page.switch.getAttribute("aria-busy"), "true");
+  const request = page.window.__heigeCodexSkinRuntime.status().controlRequest;
+  assert.deepEqual(Object.keys(request).sort(), [
+    "action",
+    "capability",
+    "expectedRevision",
+    "persistenceEnabled",
+    "requestId",
+    "schemaVersion",
+  ]);
+  assert.equal(request.action, "set-persistence");
+  assert.equal(request.expectedRevision, 7);
+  assert.equal(request.persistenceEnabled, false);
+  assert.match(request.requestId, /^[0-9a-f]{32}$/);
+  assert.match(request.capability, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(page.alert.textContent, /后台确认/);
   assert.equal(page.alert.getAttribute("role"), "alert");
 });
 
@@ -455,6 +470,7 @@ test("a stale persistence response cannot mutate the new generation", async (t) 
     mode: "active",
     persistenceEnabled: true,
     revision: 7,
+    controlRequest: null,
   });
   assert.equal(page.switch.getAttribute("aria-checked"), "true");
   assert.equal(page.alert.hidden, true);
@@ -628,6 +644,54 @@ test("remote persistence changes close inline confirmation after restoring focus
   await right.flush();
   assert.equal(right.confirmation.hidden, true);
   assert.equal(right.document.activeElement?.dataset.heigeRole, "persistence-switch");
+});
+
+test("a newer window ACK clears a queued persistence request without leaving the switch busy", async (t) => {
+  SharedBroadcastChannel.reset();
+  const left = await menuWindow({
+    BroadcastChannelClass: SharedBroadcastChannel,
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  const right = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel });
+  t.after(() => { left.close(); right.close(); SharedBroadcastChannel.reset(); });
+
+  await left.disablePersistence();
+  assert.equal(left.switch.getAttribute("aria-busy"), "true");
+  assert.notEqual(left.window.__heigeCodexSkinRuntime.status().controlRequest, null);
+
+  await right.disablePersistence();
+  await left.flush();
+
+  assert.equal(left.switch.getAttribute("aria-checked"), "false");
+  assert.equal(left.switch.getAttribute("aria-busy"), "false");
+  assert.equal(left.switch.disabled, false);
+  assert.equal(left.window.__heigeCodexSkinRuntime.status().controlRequest, null);
+});
+
+test("a newer persistence revision cancels a stale queued theme request and unlocks its rows", async (t) => {
+  SharedBroadcastChannel.reset();
+  const entries = [
+    { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+    { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+  ];
+  const left = await menuWindow({
+    BroadcastChannelClass: SharedBroadcastChannel,
+    entries,
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  const right = await menuWindow({ BroadcastChannelClass: SharedBroadcastChannel, entries });
+  t.after(() => { left.close(); right.close(); SharedBroadcastChannel.reset(); });
+
+  await left.pickTheme("night-city");
+  const nightRow = left.document.querySelector('[data-heige-theme-id="night-city"]');
+  assert.equal(nightRow.disabled, true);
+
+  await right.disablePersistence();
+  await left.flush();
+
+  assert.equal(left.themeId, "miku-488137");
+  assert.equal(nightRow.disabled, false);
+  assert.equal(left.window.__heigeCodexSkinRuntime.status().controlRequest, null);
 });
 
 test("vertical boundary images keep the palette canvas below 48 pixels per side", async (t) => {
@@ -814,6 +878,83 @@ test("a menu theme choice waits for the authoritative theme revision before appl
   assert.equal(page.themeId, "night-city");
   assert.equal(page.controlRevision, 8);
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
+});
+
+test("a renderer-blocked theme request is queued without changing the selected theme", async (t) => {
+  const page = await menuWindow({
+    persistenceEnabled: false,
+    revision: 7,
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+    fetch: async () => { throw new Error("Failed to fetch"); },
+  });
+  t.after(() => page.close());
+
+  await page.pickTheme("night-city");
+
+  const request = page.window.__heigeCodexSkinRuntime.status().controlRequest;
+  assert.deepEqual(JSON.parse(JSON.stringify(request)), {
+    schemaVersion: 1,
+    requestId: request.requestId,
+    action: "set-theme",
+    capability: request.capability,
+    expectedRevision: 7,
+    themeId: "night-city",
+  });
+  assert.match(request.requestId, /^[0-9a-f]{32}$/);
+  assert.match(request.capability, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(page.themeId, "miku-488137");
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
+  assert.match(page.alert.textContent, /后台确认/);
+});
+
+test("an authoritative formal theme replaces stale formal storage during background repair", async (t) => {
+  const page = await menuWindow({
+    activeId: "night-city",
+    preferStored: true,
+    initialStorage: {
+      heigeCodexSkinSelected: "miku-488137",
+    },
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+  });
+  t.after(() => page.close());
+
+  assert.equal(page.themeId, "night-city");
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
+});
+
+test("background repair may restore a valid local quick image without changing formal state", async (t) => {
+  const custom = {
+    name: "Local image",
+    dataUrl: `data:image/png;base64,${png(1, 1).toString("base64")}`,
+    colors: {
+      accent: "#112233",
+      secondary: "#223344",
+      surface: "#334455",
+      text: "#ddeeff",
+    },
+  };
+  const page = await menuWindow({
+    activeId: "night-city",
+    preferStored: true,
+    initialStorage: {
+      heigeCodexSkinSelected: "custom-upload",
+      heigeCodexCustomTheme: JSON.stringify(custom),
+    },
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+  });
+  t.after(() => page.close());
+
+  assert.equal(page.themeId, "custom-upload");
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "custom-upload");
 });
 
 test("a rejected theme request leaves the renderer unchanged and refreshes its revision", async (t) => {

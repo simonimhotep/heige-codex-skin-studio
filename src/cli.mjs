@@ -1118,7 +1118,10 @@ export async function productionController({
       if (platform === "win32") return true;
       return validatePortOwner(port, candidate, { platform });
     },
-    inspectSkin: () => deps.skinStatus({ port }),
+    inspectSkin: (options = {}) => deps.skinStatus({
+      port,
+      includeControlRequest: options?.purpose === "renderer-control-request",
+    }),
     validateThemeSelection: async (themeId) => {
       try {
         await themeBundle({ deps, roots, themeId });
@@ -1127,7 +1130,7 @@ export async function productionController({
         return false;
       }
     },
-    injectSkin: async ({ themeId, control, targetIds }) => {
+    injectSkin: async ({ themeId, control, targetIds, preferStored: requestPreference }) => {
       const state = await readStudioState(paths.statePath);
       const effectiveThemeId = themeId === NATIVE_THEME_ID
         ? state?.lastNonNativeThemeId ?? DEFAULT_THEME_ID
@@ -1137,7 +1140,7 @@ export async function productionController({
         loadedTheme: bundle.loadedTheme,
         themes: bundle.menuThemes,
         port,
-        preferStored: injectionPreferStored,
+        preferStored: requestPreference ?? injectionPreferStored,
         control,
         targetIds,
       });

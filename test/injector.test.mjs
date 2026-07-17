@@ -135,9 +135,23 @@ test("removes and checks the live style without persistent machinery", async () 
     revision: 7,
   }]);
   assert.equal(status.results.succeeded[0].kind, "main");
+  assert.match(FakeSession.expressions.at(-1), /const includeControlRequest = false/);
   assert.match(FakeSession.expressions[0], /remove\(\)/);
   assert.match(FakeSession.expressions[0], /heige-codex-skin-menu/);
   assert.match(FakeSession.expressions[0], /__heigeCodexSkinRuntime\?\.dispose/);
+});
+
+test("status exposes renderer control requests only to an explicit internal caller", async () => {
+  FakeSession.expressions = [];
+  const { deps } = await fixture();
+
+  await skinStatus({ port: 9341, includeControlRequest: true, deps });
+
+  assert.match(FakeSession.expressions[0], /const includeControlRequest = true/);
+  await assert.rejects(
+    skinStatus({ port: 9341, includeControlRequest: "true", deps }),
+    /includeControlRequest 必须是布尔值/,
+  );
 });
 
 test("one dead target does not abort injection into the survivors", async () => {
