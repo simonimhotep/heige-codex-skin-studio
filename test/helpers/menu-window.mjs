@@ -109,8 +109,12 @@ export async function menuWindow({
   const page = {
     window,
     document: window.document,
-    get trigger() { return window.document.querySelector("#heige-codex-skin-menu > button"); },
-    get panel() { return query("menu-panel"); },
+    get trigger() { return query("menu-trigger") ?? window.document.querySelector("#heige-codex-skin-menu > button"); },
+    get panel() { return query("theme-center") ?? query("menu-panel"); },
+    get backdrop() { return query("theme-center-backdrop"); },
+    get closeButton() { return query("theme-center-close"); },
+    get saveState() { return query("save-state"); },
+    get currentHero() { return query("current-theme-hero"); },
     get switch() { return query("persistence-switch"); },
     get confirmation() { return query("persistence-confirmation"); },
     get cancel() { return query("persistence-cancel"); },
@@ -118,7 +122,7 @@ export async function menuWindow({
     get alert() { return query("persistence-alert"); },
     get themeId() { return window.document.documentElement.dataset.heigeCodexSkin ?? null; },
     get hidden() {
-      return window.document.querySelector("#heige-codex-skin-menu > button").textContent === "";
+      return this.trigger.dataset.hidden === "true";
     },
     get controlRevision() {
       return window.__heigeCodexSkin.getPersistenceState().revision;
@@ -154,6 +158,10 @@ export async function menuWindow({
     },
     async pickTheme(id) {
       window.document.querySelector(`[data-heige-theme-id="${id}"]`).click();
+      await flushMicrotasks(window);
+    },
+    async openThemeCenter() {
+      this.trigger.click();
       await flushMicrotasks(window);
     },
     async pickNative() {

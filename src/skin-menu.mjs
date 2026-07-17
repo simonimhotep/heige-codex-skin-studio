@@ -260,52 +260,145 @@ export function buildSkinMenuScript({
   const root = document.createElement("div");
   root.id = data.menuId;
   root.dataset.heigeGeneration = generation;
-  // 双平台统一放顶部中间：右上角会撞 Windows 的窗口控制按钮和 Codex 自身菜单；
-  // 顶部中间正是标题栏拖拽区，no-drag 必须保留，否则点击被拖拽吞掉
-  root.style.cssText = "position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:2147483000;font:500 13px/1.4 system-ui;user-select:none;-webkit-app-region:no-drag;";
 
   const button = document.createElement("button");
   button.type = "button";
-  button.setAttribute("aria-label", "打开皮肤菜单");
+  button.dataset.heigeRole = "menu-trigger";
+  button.setAttribute("aria-label", "打开主题中心");
   button.setAttribute("aria-expanded", "false");
   button.title = "HeiGe Codex Skin Studio";
-  button.style.cssText = "display:block;margin:0 auto;width:30px;height:30px;border-radius:50%;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.82);backdrop-filter:blur(10px);box-shadow:0 2px 8px rgba(0,0,0,.14);cursor:pointer;font-size:15px;padding:0;-webkit-app-region:no-drag;";
+  const triggerPreview = document.createElement("span");
+  triggerPreview.dataset.heigeRole = "menu-trigger-preview";
+  triggerPreview.setAttribute("aria-hidden", "true");
+  const triggerText = document.createElement("span");
+  triggerText.textContent = "主题";
   const triggerGlyph = document.createElement("span");
   triggerGlyph.dataset.heigeRole = "menu-trigger-glyph";
-  triggerGlyph.textContent = "\\u{1F3A8}";
+  triggerGlyph.textContent = "\\u2726";
   triggerGlyph.setAttribute("aria-hidden", "true");
-  button.appendChild(triggerGlyph);
+  button.append(triggerPreview, triggerText, triggerGlyph);
 
-  const panel = document.createElement("div");
+  const backdrop = document.createElement("div");
+  backdrop.dataset.heigeRole = "theme-center-backdrop";
+  backdrop.hidden = true;
+
+  const panel = document.createElement("section");
   panel.id = data.menuId + "-panel";
-  panel.dataset.heigeRole = "menu-panel";
-  panel.style.cssText = "display:none;margin-top:8px;width:330px;max-width:calc(100vw - 24px);max-height:calc(100vh - 58px);overflow-y:auto;overscroll-behavior:contain;padding:6px;border-radius:12px;border:1px solid rgba(0,0,0,.1);background:rgba(255,255,255,.94);backdrop-filter:blur(16px);box-shadow:0 10px 30px rgba(0,0,0,.18);color:#17344f;-webkit-app-region:no-drag;";
+  panel.dataset.heigeRole = "theme-center";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-labelledby", data.menuId + "-title");
+  panel.setAttribute("aria-describedby", data.menuId + "-description");
+  panel.style.display = "none";
   button.setAttribute("aria-controls", panel.id);
+
+  const header = document.createElement("header");
+  header.dataset.heigeRole = "theme-center-header";
+  const headerCopy = document.createElement("div");
+  const title = document.createElement("h2");
+  title.id = data.menuId + "-title";
+  title.textContent = "HeiGe 主题中心";
+  title.style.cssText = "margin:0;font-size:19px;line-height:1.2;letter-spacing:-.02em;";
+  const description = document.createElement("p");
+  description.id = data.menuId + "-description";
+  description.textContent = "换个背景，也换个工作心情";
+  description.style.cssText = "margin:3px 0 0;font-size:11px;color:rgba(23,52,79,.62);";
+  headerCopy.append(title, description);
+  const saveState = document.createElement("div");
+  saveState.dataset.heigeRole = "save-state";
+  saveState.dataset.state = "saved";
+  saveState.setAttribute("aria-live", "polite");
+  saveState.textContent = "已保存";
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.dataset.heigeRole = "theme-center-close";
+  closeButton.setAttribute("aria-label", "关闭主题中心");
+  closeButton.textContent = "\\u00d7";
+  closeButton.style.cssText = "width:34px;height:34px;padding:0;border:1px solid rgba(23,77,102,.12);border-radius:50%;background:rgba(255,255,255,.68);color:#17344f;cursor:pointer;font-size:22px;line-height:30px;";
+  const headerActions = document.createElement("div");
+  headerActions.style.cssText = "display:flex;align-items:center;gap:10px;";
+  headerActions.append(saveState, closeButton);
+  header.append(headerCopy, headerActions);
+
+  const scroll = document.createElement("div");
+  scroll.dataset.heigeRole = "theme-center-scroll";
+  const currentHero = document.createElement("section");
+  currentHero.dataset.heigeRole = "current-theme-hero";
+  const heroCopy = document.createElement("div");
+  const heroEyebrow = document.createElement("small");
+  heroEyebrow.textContent = "当前主题";
+  heroEyebrow.style.cssText = "display:block;margin-bottom:4px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;opacity:.76;";
+  const heroName = document.createElement("strong");
+  heroName.style.cssText = "display:block;font-size:18px;text-shadow:0 1px 8px rgba(0,0,0,.24);";
+  heroCopy.append(heroEyebrow, heroName);
+  currentHero.appendChild(heroCopy);
+  const quickActions = document.createElement("section");
+  quickActions.dataset.heigeRole = "quick-actions";
+  const customSection = document.createElement("section");
+  customSection.dataset.heigeRole = "custom-theme-section";
+  customSection.hidden = true;
+  const customHeading = document.createElement("h3");
+  customHeading.textContent = "我的主题";
+  customHeading.style.cssText = "margin:0 0 9px;font-size:13px;";
+  const customGrid = document.createElement("div");
+  customGrid.dataset.heigeRole = "custom-theme-grid";
+  customSection.append(customHeading, customGrid);
+  const builtInHeading = document.createElement("h3");
+  builtInHeading.textContent = "内置主题";
+  builtInHeading.style.cssText = "margin:0 0 9px;font-size:13px;";
+  const themeGrid = document.createElement("section");
+  themeGrid.dataset.heigeRole = "theme-grid";
+  scroll.append(currentHero, quickActions, customSection, builtInHeading, themeGrid);
+  const footer = document.createElement("footer");
+  footer.dataset.heigeRole = "theme-center-footer";
+  panel.append(header, scroll, footer);
+  backdrop.appendChild(panel);
+
   let hidden = false;
   const setPanelOpen = (open, { focusTrigger = false } = {}) => {
     assertCurrent();
     const next = open === true && !hidden;
-    if (!next && focusTrigger) button.focus();
-    panel.style.display = next ? "block" : "none";
+    backdrop.hidden = !next;
+    panel.style.display = next ? "grid" : "none";
     button.setAttribute("aria-expanded", String(next));
-    button.setAttribute("aria-label", hidden ? "显示皮肤菜单" : next ? "关闭皮肤菜单" : "打开皮肤菜单");
+    button.setAttribute("aria-label", hidden ? "显示主题入口" : "打开主题中心");
+    if (next) closeButton.focus();
+    else if (focusTrigger) button.focus();
   };
   listen(panel, "focusin", (event) => {
     event.target?.scrollIntoView?.({ block: "nearest" });
   });
   listen(panel, "keydown", (event) => {
-    if (event.key !== "Escape" || panel.style.display === "none") return;
-    event.preventDefault();
-    event.stopPropagation();
-    setPanelOpen(false, { focusTrigger: true });
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setPanelOpen(false, { focusTrigger: true });
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...panel.querySelectorAll("button:not([disabled]),[tabindex='0']")];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  listen(closeButton, "click", () => setPanelOpen(false, { focusTrigger: true }));
+  listen(backdrop, "click", (event) => {
+    if (event.target === backdrop) setPanelOpen(false, { focusTrigger: true });
   });
 
   const rows = new Map();
   const paint = (id) => {
-    for (const [rowId, row] of rows) {
-      row.style.background = rowId === id ? "rgba(36,201,215,.16)" : "transparent";
-      row.style.fontWeight = rowId === id ? "700" : "500";
-      if (row.hasAttribute("aria-pressed")) row.setAttribute("aria-pressed", String(rowId === id));
+    for (const [rowId, item] of rows) {
+      const selected = rowId === id || (id === data.nativeSel && rowId === null);
+      if (item.hasAttribute("aria-pressed")) item.setAttribute("aria-pressed", String(selected));
+      item.querySelector('[data-heige-role="theme-check"]')?.toggleAttribute("hidden", !selected);
     }
   };
   const row = (label, dotColor, onPick, before, { role = "menu-action", selectable = false } = {}) => {
@@ -313,20 +406,74 @@ export function buildSkinMenuScript({
     item.type = "button";
     item.dataset.heigeRole = role;
     if (selectable) item.setAttribute("aria-pressed", "false");
-    item.style.cssText = "display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer;font:inherit;text-align:left;";
+    item.style.cssText = "display:flex;align-items:center;gap:9px;min-height:42px;width:100%;padding:8px 12px;color:inherit;cursor:pointer;text-align:left;";
     const dot = document.createElement("span");
     dot.setAttribute("aria-hidden", "true");
     dot.style.cssText = "width:10px;height:10px;border-radius:50%;flex:none;background:" + dotColor + ";";
     const text = document.createElement("span");
     text.textContent = label;
     item.append(dot, text);
-    listen(item, "mouseenter", () => { if (item.style.fontWeight !== "700") item.style.background = "rgba(0,0,0,.05)"; });
-    // 先无条件复位再 paint：上传行/隐藏行不在 rows 里，paint 遍历不到它们，
-    // 只靠 paint 会让这两行的 hover 灰底永久残留
-    listen(item, "mouseleave", () => { item.style.background = "transparent"; paint(document.documentElement.dataset.heigeCodexSkin ?? null); });
     listen(item, "click", () => onPick(item));
-    if (before) panel.insertBefore(item, before); else panel.appendChild(item);
+    const parent = role === "upload-trigger" || role === "native-option"
+      ? quickActions
+      : role === "hide-trigger"
+        ? footer
+        : themeGrid;
+    if (before?.parentElement === parent) parent.insertBefore(item, before);
+    else parent.appendChild(item);
     return item;
+  };
+
+  const themePreview = ({ dataUrl, colors, label }) => {
+    const preview = document.createElement("span");
+    preview.dataset.heigeRole = "theme-preview";
+    preview.setAttribute("aria-label", label);
+    if (dataUrl !== null) {
+      preview.style.backgroundImage = "url(" + JSON.stringify(dataUrl) + ")";
+    } else {
+      const list = [colors.accent, colors.secondary, colors.surface];
+      preview.dataset.fallbackColors = list.join(",");
+      preview.style.background = "linear-gradient(135deg," + list[0] + "," + list[1] + " 52%," + list[2] + ")";
+    }
+    return preview;
+  };
+  const createThemeCard = (theme, onPick) => {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.dataset.heigeRole = "theme-option";
+    card.dataset.heigeThemeId = theme.id;
+    card.setAttribute("aria-pressed", "false");
+    const preview = themePreview({
+      dataUrl: theme.dataUrl ?? previewFromGeneratedCss(theme.css),
+      colors: theme.colors,
+      label: theme.name + " 主题预览",
+    });
+    const copy = document.createElement("span");
+    copy.dataset.heigeRole = "theme-card-copy";
+    copy.style.cssText = "align-self:center;min-width:0;";
+    const name = document.createElement("strong");
+    name.textContent = theme.name;
+    name.style.cssText = "display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    const id = document.createElement("small");
+    id.textContent = theme.id.toUpperCase().replaceAll("-", " ");
+    id.style.cssText = "display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;letter-spacing:.08em;opacity:.58;";
+    const colors = document.createElement("span");
+    colors.dataset.heigeRole = "theme-color-dots";
+    colors.style.cssText = "display:flex;gap:4px;margin-top:7px;";
+    for (const value of [theme.colors.accent, theme.colors.secondary, theme.colors.surface]) {
+      const dot = document.createElement("i");
+      dot.style.cssText = "width:7px;height:7px;border-radius:50%;background:" + value + ";";
+      colors.appendChild(dot);
+    }
+    copy.append(name, id, colors);
+    const check = document.createElement("span");
+    check.dataset.heigeRole = "theme-check";
+    check.textContent = "\\u2713";
+    check.setAttribute("aria-hidden", "true");
+    check.hidden = true;
+    card.append(preview, copy, check);
+    listen(card, "click", () => onPick(card));
+    return card;
   };
 
   // 正式主题由 controller state 决定。localStorage 只保留本机快捷图片与兼容事件。
@@ -334,6 +481,7 @@ export function buildSkinMenuScript({
   const readSelected = () => { assertCurrent(); try { return localStorage.getItem(data.selectedKey); } catch { return null; } };
   // 卸载皮肤后 style 已脱离 DOM，任何脚本化调用不得再改 dataset/写存储，否则污染 status
   const alive = () => { assertCurrent(); return style.isConnected; };
+  let paintCurrentTheme = () => {};
 
   const setTheme = (id, persist = true, broadcast = true) => {
     if (!alive()) return;
@@ -342,6 +490,7 @@ export function buildSkinMenuScript({
     style.textContent = theme.css;
     document.documentElement.dataset.heigeCodexSkin = theme.id;
     paint(theme.id);
+    paintCurrentTheme(theme.id);
     if (persist) writeSelected(theme.id);
     if (broadcast) publish("theme", theme.id);
   };
@@ -349,7 +498,8 @@ export function buildSkinMenuScript({
     if (!alive()) return;
     style.textContent = "";
     delete document.documentElement.dataset.heigeCodexSkin;
-    paint(null);
+    paint(data.nativeSel);
+    paintCurrentTheme(data.nativeSel);
     if (persist) writeSelected(data.nativeSel);
     if (broadcast) publish("theme", data.nativeSel);
   };
@@ -361,13 +511,11 @@ export function buildSkinMenuScript({
   };
 
   for (const theme of data.themes) {
-    const themeRow = row(theme.name, theme.accent, () => {
-      void requestThemeSelection(theme.id).then((applied) => {
-        if (applied) setPanelOpen(false, { focusTrigger: true });
-      });
-    }, null, { role: "theme-option", selectable: true });
-    themeRow.dataset.heigeThemeId = theme.id;
+    const themeRow = createThemeCard(theme, () => {
+      void requestThemeSelection(theme.id);
+    });
     rows.set(theme.id, themeRow);
+    themeGrid.appendChild(themeRow);
   }
 
   // ---- 自定义图片：本地选图 -> 压缩 -> 取色 -> 生成 CSS -> 持久化 ----
@@ -585,6 +733,32 @@ export function buildSkinMenuScript({
   };
 
   let currentCustom = null;   // 内存态：save 失败时仍以它为准，不被 localStorage 里的旧图覆盖
+  const paintSaveState = (state, message) => {
+    saveState.dataset.state = state;
+    saveState.textContent = message;
+  };
+  paintCurrentTheme = (themeId) => {
+    const theme = data.themes.find((candidate) => candidate.id === themeId);
+    const custom = themeId === data.customId ? currentCustom ?? loadCustom() : null;
+    const preview = theme ? previewFromGeneratedCss(theme.css) : custom?.dataUrl ?? null;
+    currentHero.dataset.themeId = themeId;
+    currentHero.style.backgroundImage = preview === null
+      ? "linear-gradient(135deg,#26343b,#67757a)"
+      : "linear-gradient(90deg,rgba(7,28,52,.84),rgba(7,28,52,.18)),url("
+        + JSON.stringify(preview) + ")";
+    heroName.textContent = theme?.name
+      ?? (themeId === data.customId ? custom?.name ?? "我的主题" : "原生 Codex");
+    for (const [id, card] of rows) {
+      const selected = id === themeId || (themeId === data.nativeSel && id === null);
+      card.setAttribute("aria-pressed", String(selected));
+      card.querySelector('[data-heige-role="theme-check"]')?.toggleAttribute("hidden", !selected);
+    }
+    const triggerUrl = theme === undefined ? custom?.dataUrl ?? null : previewFromGeneratedCss(theme.css);
+    triggerPreview.style.backgroundImage = triggerUrl === null
+      ? "linear-gradient(135deg,#26343b,#98a4a8)"
+      : "url(" + JSON.stringify(triggerUrl) + ")";
+    root.style.setProperty("--heige-accent", theme?.colors.accent ?? custom?.colors?.accent ?? "#19c9e5");
+  };
   const applyCustomTheme = (theme, persist = true, broadcast = true) => {
     if (!alive()) return;
     currentCustom = theme;
@@ -592,6 +766,7 @@ export function buildSkinMenuScript({
     document.documentElement.dataset.heigeCodexSkin = data.customId;
     ensureCustomRow(theme);
     paint(data.customId);
+    paintCurrentTheme(data.customId);
     if (persist) writeSelected(data.customId);
     if (broadcast) publish("theme", data.customId);
   };
@@ -606,24 +781,28 @@ export function buildSkinMenuScript({
     if (document.documentElement.dataset.heigeCodexSkin === data.customId) clearTheme();
     customRowContainer?.remove();
     rows.delete(data.customId);
+    customSection.hidden = true;
     customRow = null;
     customRowContainer = null;
     customDelete = null;
   };
   const ensureCustomRow = (theme) => {
     if (customRow) {
-      customRow.querySelector("span + span").textContent = theme.name;
-      customRow.firstChild.style.background = theme.colors.accent;
+      customRow.querySelector('[data-heige-role="theme-card-copy"] strong').textContent = theme.name;
+      customRow.querySelector('[data-heige-role="theme-preview"]').style.backgroundImage =
+        "url(" + JSON.stringify(theme.dataUrl) + ")";
       customDelete.setAttribute("aria-label", "删除自定义主题：" + theme.name);
       return;
     }
-    customRow = row(theme.name, theme.colors.accent, () => {
+    customRow = createThemeCard({
+      id: data.customId,
+      name: theme.name,
+      dataUrl: theme.dataUrl,
+      colors: theme.colors,
+      css: "",
+    }, () => {
       applyCustomTheme(currentCustom ?? loadCustom() ?? theme);
-      setPanelOpen(false, { focusTrigger: true });
-    }, uploadRow, { role: "theme-option", selectable: true });
-    customRow.dataset.heigeThemeId = data.customId;
-    const text = customRow.querySelector("span + span");
-    text.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    });
     customDelete = document.createElement("button");
     customDelete.type = "button";
     customDelete.dataset.heigeRole = "custom-delete";
@@ -632,11 +811,16 @@ export function buildSkinMenuScript({
     customDelete.style.cssText = "flex:none;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:#713a31;cursor:pointer;font:700 14px/24px system-ui;";
     listen(customDelete, "mouseenter", () => { customDelete.style.background = "rgba(220,60,60,.15)"; customDelete.style.color = "#8f211d"; });
     listen(customDelete, "mouseleave", () => { customDelete.style.background = "transparent"; customDelete.style.color = "#713a31"; });
-    listen(customDelete, "click", deleteCustom);
+    listen(customDelete, "click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteCustom();
+    });
     customRowContainer = document.createElement("div");
-    customRowContainer.style.cssText = "display:flex;align-items:center;gap:2px;";
-    panel.insertBefore(customRowContainer, customRow);
+    customRowContainer.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr) 30px;align-items:center;gap:4px;margin-bottom:18px;";
     customRowContainer.append(customRow, customDelete);
+    customGrid.appendChild(customRowContainer);
+    customSection.hidden = false;
     rows.set(data.customId, customRow);
   };
 
@@ -670,7 +854,7 @@ export function buildSkinMenuScript({
   uploadAlert.setAttribute("aria-busy", "false");
   uploadAlert.hidden = true;
   uploadAlert.style.cssText = "margin:6px 4px;padding:7px 8px;border-radius:7px;background:rgba(187,72,50,.10);font-size:11px;line-height:1.5;color:#713a31;white-space:pre-line;";
-  panel.appendChild(uploadAlert);
+  scroll.insertBefore(uploadAlert, customSection);
   const showUploadAlert = (message, kind = "error") => {
     assertCurrent();
     uploadAlert.textContent = String(message).replace(/[\\r\\n\\t]+/g, " ").slice(0, 180);
@@ -875,7 +1059,7 @@ export function buildSkinMenuScript({
   if (data.control?.available === true) {
     const section = document.createElement("section");
     section.dataset.heigeRole = "persistence-section";
-    section.style.cssText = "margin-top:6px;padding:10px;border-top:1px solid rgba(23,52,79,.1);background:rgba(36,201,215,.055);border-radius:9px;";
+    section.style.cssText = "display:flex;align-items:center;flex:1;min-width:0;";
 
     const heading = document.createElement("div");
     heading.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;";
@@ -917,7 +1101,7 @@ export function buildSkinMenuScript({
     confirmation.setAttribute("aria-describedby", helper.id);
     confirmation.setAttribute("aria-busy", "false");
     confirmation.hidden = true;
-    confirmation.style.cssText = "margin-top:9px;padding:9px;border:1px solid rgba(187,72,50,.24);border-radius:8px;background:rgba(255,244,240,.92);";
+    confirmation.style.cssText = "padding:12px;border:1px solid rgba(187,72,50,.24);border-radius:12px;background:rgba(255,244,240,.96);";
     const confirmationText = document.createElement("div");
     confirmationText.id = data.menuId + "-persistence-confirmation-text";
     confirmationText.textContent = "确认关闭常驻？本次会话仍继续使用皮肤，下次启动将恢复原生界面。";
@@ -943,10 +1127,10 @@ export function buildSkinMenuScript({
     alert.setAttribute("role", "alert");
     alert.setAttribute("aria-live", "polite");
     alert.hidden = true;
-    alert.style.cssText = "margin-top:8px;padding:7px 8px;border-radius:7px;background:rgba(23,52,79,.07);font-size:11px;line-height:1.5;color:#17344f;white-space:pre-line;";
+    alert.style.cssText = "padding:10px 12px;border-radius:12px;background:rgba(248,252,255,.96);font-size:11px;line-height:1.5;color:#17344f;white-space:pre-line;";
 
     section.append(heading, helper, confirmation, alert);
-    panel.appendChild(section);
+    footer.appendChild(section);
 
     let persistenceEnabled = data.control.persistenceEnabled;
     let controlRevision = data.control.revision;
@@ -1037,6 +1221,7 @@ export function buildSkinMenuScript({
           paintPersistence();
         } else {
           rollbackOptimisticTheme();
+          paintSaveState("error", "未保存，请重试");
           themePending = false;
           for (const item of rows.values()) item.disabled = false;
         }
@@ -1064,6 +1249,7 @@ export function buildSkinMenuScript({
         themeId,
       };
       optimisticPreviousThemeId = currentThemeId;
+      paintSaveState("saving", "正在保存");
       renderThemeSelection(themeId, false, false);
       themePending = true;
       let queued = false;
@@ -1103,6 +1289,7 @@ export function buildSkinMenuScript({
             ? body.message
             : "后台拒绝了主题选择，界面未更改";
           rollbackOptimisticTheme();
+          paintSaveState("error", "未保存，请重试");
           showAlert(message);
           return false;
         }
@@ -1120,6 +1307,7 @@ export function buildSkinMenuScript({
         publish("persistence", { enabled: persistenceEnabled, revision: controlRevision });
         optimisticPreviousThemeId = null;
         renderThemeSelection(themeId, true, true);
+        paintSaveState("saved", "已保存");
         showAlert("主题选择已保存。", "success");
         return true;
       } catch (error) {
@@ -1127,6 +1315,7 @@ export function buildSkinMenuScript({
           queued = queueControlRequest(fallbackRequest);
           if (!queued) {
             rollbackOptimisticTheme();
+            paintSaveState("error", "未保存，请重试");
             showAlert(safeClientError(error));
           }
         }
@@ -1239,6 +1428,7 @@ export function buildSkinMenuScript({
       if (cleared?.action === "set-persistence") pending = false;
       if (cleared?.action === "set-theme") {
         rollbackOptimisticTheme();
+        paintSaveState("error", "未保存，请重试");
         themePending = false;
         for (const item of rows.values()) item.disabled = false;
       }
@@ -1286,25 +1476,29 @@ export function buildSkinMenuScript({
   const readHidden = () => { assertCurrent(); try { return localStorage.getItem(data.hiddenKey) === "1"; } catch { return false; } };
   const writeHidden = (value) => { assertCurrent(); try { if (value) localStorage.setItem(data.hiddenKey, "1"); else localStorage.removeItem(data.hiddenKey); } catch {} };
   const FULL_BUTTON_CSS = button.style.cssText;
-  const MINI_BUTTON_CSS = "display:block;margin:0 auto;width:24px;height:24px;border:0;background:transparent;box-shadow:none;cursor:pointer;font-size:0;padding:0;-webkit-app-region:no-drag;";
+  const MINI_BUTTON_CSS = "width:24px;height:24px;min-width:24px;padding:0;border:0;background:transparent;box-shadow:none;cursor:pointer;font-size:0;-webkit-app-region:no-drag;";
   const setHidden = (value, persist = true, broadcast = true) => {
     assertCurrent();
     if (typeof value !== "boolean") return;
     const panelHadFocus = panel.contains(document.activeElement);
     if (value) setPanelOpen(false, { focusTrigger: panelHadFocus });
     hidden = value;
+    button.dataset.hidden = String(value);
     button.style.cssText = value ? MINI_BUTTON_CSS : FULL_BUTTON_CSS;
-    triggerGlyph.textContent = value ? "" : "\\u{1F3A8}";
-    triggerGlyph.style.cssText = value
+    triggerText.hidden = value;
+    triggerGlyph.hidden = value;
+    triggerPreview.style.cssText = value
       ? "display:block;margin:auto;width:10px;height:10px;border-radius:50%;background:#66788a;box-shadow:0 1px 4px rgba(0,0,0,.18);opacity:.55;"
       : "";
+    if (!value) paintCurrentTheme(document.documentElement.dataset.heigeCodexSkin ?? data.nativeSel);
     button.title = value ? "\\u663e\\u793a\\u6362\\u80a4\\u6309\\u94ae" : "HeiGe Codex Skin Studio";
+    button.setAttribute("aria-label", value ? "显示主题入口" : "打开主题中心");
     setPanelOpen(false);
     if (persist) writeHidden(value);
     if (broadcast) publish("menu-hidden", value);
   };
-  listen(button, "mouseenter", () => { if (hidden) { triggerGlyph.style.opacity = ".9"; triggerGlyph.style.transform = "scale(1.15)"; } });
-  listen(button, "mouseleave", () => { if (hidden) { triggerGlyph.style.opacity = ".55"; triggerGlyph.style.transform = "scale(1)"; } });
+  listen(button, "mouseenter", () => { if (hidden) { triggerPreview.style.opacity = ".9"; triggerPreview.style.transform = "scale(1.15)"; } });
+  listen(button, "mouseleave", () => { if (hidden) { triggerPreview.style.opacity = ".55"; triggerPreview.style.transform = "scale(1)"; } });
   const hideRow = row("\\u9690\\u85cf\\u6b64\\u6309\\u94ae", "rgba(0,0,0,.18)", () => setHidden(true), null, { role: "hide-trigger" });
   hideRow.style.borderTop = "1px solid rgba(0,0,0,.08)";
 
@@ -1397,10 +1591,10 @@ export function buildSkinMenuScript({
   listen(button, "click", () => {
     assertCurrent();
     if (hidden) { setHidden(false); return; }
-    setPanelOpen(panel.style.display === "none");
+    setPanelOpen(backdrop.hidden);
   });
 
-  root.append(button, panel, picker);
+  root.append(button, backdrop, picker);
   document.body.appendChild(root);
   // 自动补针只允许恢复不进入正式 state 的本机快捷图片。
   // 正式主题与原生界面始终服从 controller 传入的 activeId。

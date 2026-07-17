@@ -11,6 +11,10 @@ export const THEME_CENTER_STYLE = String.raw`
 }
 #heige-codex-skin-menu [hidden] { display: none !important; }
 #heige-codex-skin-menu button { font: inherit; }
+#heige-codex-skin-menu button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--heige-accent, #19c9e5) 78%, #17344f);
+  outline-offset: 2px;
+}
 [data-heige-role="menu-trigger"] {
   pointer-events: auto;
   position: fixed;
@@ -31,6 +35,14 @@ export const THEME_CENTER_STYLE = String.raw`
   color: #17344f;
   cursor: pointer;
   -webkit-app-region: no-drag;
+}
+[data-heige-role="menu-trigger"]:hover {
+  border-color: color-mix(in srgb, var(--heige-accent, #19c9e5) 52%, transparent);
+  box-shadow: 0 8px 26px rgba(26,111,126,.21);
+}
+[data-heige-role="menu-trigger"][data-hidden="true"] {
+  display: block;
+  border: 0;
 }
 [data-heige-role="menu-trigger-preview"] {
   width: 19px;
@@ -80,6 +92,7 @@ export const THEME_CENTER_STYLE = String.raw`
   border-bottom: 1px solid rgba(23,77,102,.1);
 }
 [data-heige-role="theme-center-footer"] {
+  position: relative;
   border-top: 1px solid rgba(23,77,102,.1);
 }
 [data-heige-role="theme-center-scroll"] {
@@ -121,12 +134,25 @@ export const THEME_CENTER_STYLE = String.raw`
   color: inherit;
   cursor: pointer;
 }
+[data-heige-role="native-option"],
+[data-heige-role="upload-trigger"] {
+  justify-content: flex-start;
+  padding: 11px 14px !important;
+  box-shadow: 0 8px 20px rgba(33,128,142,.07);
+}
+[data-heige-role="native-option"]:hover,
+[data-heige-role="upload-trigger"]:hover,
+[data-heige-role="theme-option"]:hover {
+  border-color: color-mix(in srgb, var(--heige-accent, #19c9e5) 42%, transparent);
+  background: rgba(255,255,255,.86);
+}
 [data-heige-role="theme-option"] {
   display: grid;
   grid-template-columns: 92px minmax(0,1fr) 20px;
   gap: 10px;
   padding: 7px;
   text-align: left;
+  box-shadow: 0 8px 18px rgba(33,128,142,.055);
 }
 [data-heige-role="theme-option"][aria-pressed="true"] {
   border-color: #13b7bd;
@@ -138,6 +164,61 @@ export const THEME_CENTER_STYLE = String.raw`
   border-radius: 11px;
   background-position: center;
   background-size: cover;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.24);
+}
+[data-heige-role="theme-check"] {
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #13aeb6;
+  color: #fff;
+  font-size: 11px;
+  box-shadow: 0 4px 10px rgba(19,174,182,.24);
+}
+[data-heige-role="custom-theme-grid"] [data-heige-role="theme-option"] {
+  max-width: 350px;
+}
+[data-heige-role="custom-delete"] {
+  border: 1px solid rgba(113,58,49,.12) !important;
+  background: rgba(255,255,255,.6) !important;
+}
+[data-heige-role="persistence-section"] {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+[data-heige-role="persistence-helper"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+[data-heige-role="persistence-confirmation"],
+[data-heige-role="persistence-alert"] {
+  position: absolute;
+  right: 24px;
+  bottom: 68px;
+  z-index: 2;
+  width: min(360px,calc(100vw - 48px));
+  box-shadow: 0 16px 42px rgba(27,76,97,.22);
+}
+[data-heige-role="hide-trigger"] {
+  flex: none;
+  width: auto !important;
+  min-height: 34px !important;
+  padding: 6px 10px !important;
+  border: 1px solid rgba(23,77,102,.1) !important;
+  border-radius: 10px;
+  background: rgba(255,255,255,.54);
+}
+[data-heige-role="hide-trigger"] span:first-child {
+  display: none;
 }
 [data-heige-role="save-state"] {
   border-radius: 999px;
@@ -166,5 +247,10 @@ export const THEME_CENTER_STYLE = String.raw`
   [data-heige-role="theme-center"] { width: 100%; min-width: 0; height: 100%; border-radius: 18px; }
   [data-heige-role="theme-grid"],
   [data-heige-role="quick-actions"] { grid-template-columns: 1fr; }
+  [data-heige-role="theme-center-header"],
+  [data-heige-role="theme-center-footer"] { padding-right: 14px; padding-left: 14px; }
+  [data-heige-role="theme-center-scroll"] { padding: 14px; }
+  [data-heige-role="hide-trigger"] span:last-child { font-size: 0; }
+  [data-heige-role="hide-trigger"] span:last-child::after { content: "隐藏入口"; font-size: 11px; }
 }
 `;

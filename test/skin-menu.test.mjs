@@ -107,7 +107,7 @@ test("centers the menu at the top clear of window controls on every platform", (
     entries: [{ id: "a", name: "A", accent: "#123456", css: "#root{}" }],
   });
 
-  assert.match(script, /left:50%/, "menu must anchor to the horizontal center");
+  assert.match(script, /left:\s*50%/, "menu must anchor to the horizontal center");
   assert.match(script, /translateX\(-50%\)/, "menu must center on its own width");
   assert.doesNotMatch(script, /right:1?\d+px/, "no corner offset may remain");
   assert.match(script, /-webkit-app-region:no-drag/, "controls must opt out of the titlebar drag region");

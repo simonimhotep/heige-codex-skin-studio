@@ -177,6 +177,82 @@ function contrastRatio(left, right) {
   return (values[0] + 0.05) / (values[1] + 0.05);
 }
 
+test("theme trigger opens an accessible modal and restores focus on close paths", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  assert.equal(page.trigger.getAttribute("aria-label"), "打开主题中心");
+  assert.equal(page.panel.getAttribute("role"), "dialog");
+  assert.equal(page.panel.getAttribute("aria-modal"), "true");
+  assert.equal(page.backdrop.hidden, true);
+
+  await page.openThemeCenter();
+  assert.equal(page.backdrop.hidden, false);
+  assert.equal(page.trigger.getAttribute("aria-expanded"), "true");
+  assert.equal(page.document.activeElement, page.closeButton);
+
+  page.panel.dispatchEvent(new page.window.KeyboardEvent("keydown", {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+  }));
+  assert.equal(page.backdrop.hidden, true);
+  assert.equal(page.document.activeElement, page.trigger);
+
+  await page.openThemeCenter();
+  page.backdrop.dispatchEvent(new page.window.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+  }));
+  assert.equal(page.backdrop.hidden, true);
+  assert.equal(page.document.activeElement, page.trigger);
+});
+
+test("theme center traps Tab focus inside the dialog", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  await page.openThemeCenter();
+  const focusable = [...page.panel.querySelectorAll("button:not([disabled]),[tabindex='0']")];
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  last.focus();
+  page.panel.dispatchEvent(new page.window.KeyboardEvent("keydown", {
+    key: "Tab",
+    bubbles: true,
+    cancelable: true,
+  }));
+  assert.equal(page.document.activeElement, first);
+});
+
+test("theme center renders native upload and built-in preview cards", async (t) => {
+  const page = await menuWindow({
+    entries: [
+      {
+        id: "miku-488137",
+        name: "Miku",
+        accent: "#19c9e5",
+        colors: { accent: "#19c9e5", secondary: "#ed6ec1", surface: "#f5f6fc", text: "#122c60" },
+        css: '#root{background:url("data:image/webp;base64,QUJDRA==")}',
+      },
+      {
+        id: "night-city",
+        name: "Night City",
+        accent: "#4455aa",
+        colors: { accent: "#4455aa", secondary: "#d25c9d", surface: "#121725", text: "#f4f6ff" },
+        css: "html{color:#eee}",
+      },
+    ],
+  });
+  t.after(() => page.close());
+
+  assert.equal(page.document.querySelector('[data-heige-role="native-option"]')?.tagName, "BUTTON");
+  assert.equal(page.document.querySelector('[data-heige-role="upload-trigger"]')?.tagName, "BUTTON");
+  const cards = [...page.document.querySelectorAll('[data-heige-role="theme-option"]')];
+  assert.equal(cards.length, 2);
+  assert.match(cards[0].querySelector('[data-heige-role="theme-preview"]').style.backgroundImage, /data:image\/webp/);
+  assert.match(cards[1].querySelector('[data-heige-role="theme-preview"]').dataset.fallbackColors, /#4455aa/i);
+  assert.equal(page.currentHero.dataset.themeId, "miku-488137");
+});
+
 test("switch exposes programmatic state and permanent re-enable guidance", async (t) => {
   const page = await menuWindow({ persistenceEnabled: true, revision: 7 });
   t.after(() => page.close());
@@ -240,7 +316,10 @@ test("menu actions use native buttons and expose selected theme state", async (t
   assert.equal(themeButtons.every((item) => item.tagName === "BUTTON" && item.type === "button"), true);
   assert.equal(themeButtons[0].getAttribute("aria-pressed"), "true");
   assert.equal(themeButtons[1].getAttribute("aria-pressed"), "false");
-  assert.equal(themeButtons[0].querySelector("span")?.getAttribute("aria-hidden"), "true");
+  assert.match(
+    themeButtons[0].querySelector('[data-heige-role="theme-preview"]')?.getAttribute("aria-label") ?? "",
+    /主题预览/,
+  );
   for (const role of ["upload-trigger", "native-option", "hide-trigger"]) {
     const action = page.document.querySelector(`[data-heige-role="${role}"]`);
     assert.equal(action?.tagName, "BUTTON", `${role} should be a native button`);
@@ -249,18 +328,19 @@ test("menu actions use native buttons and expose selected theme state", async (t
   await page.pickTheme("night-city");
   assert.equal(page.themeId, "night-city");
   assert.equal(themeButtons[1].getAttribute("aria-pressed"), "true");
-  assert.equal(page.document.activeElement, page.trigger);
+  assert.equal(page.backdrop.hidden, true);
 });
 
 test("menu disclosure publishes its state and Escape closes back to the trigger", async (t) => {
   const page = await menuWindow();
   t.after(() => page.close());
-  assert.equal(page.trigger.getAttribute("aria-label"), "打开皮肤菜单");
+  assert.equal(page.trigger.getAttribute("aria-label"), "打开主题中心");
   assert.equal(page.trigger.getAttribute("aria-expanded"), "false");
   assert.equal(page.trigger.getAttribute("aria-controls"), page.panel.id);
   page.trigger.click();
   assert.equal(page.trigger.getAttribute("aria-expanded"), "true");
-  assert.equal(page.panel.style.display, "block");
+  assert.equal(page.panel.style.display, "grid");
+  assert.equal(page.backdrop.hidden, false);
   const firstTheme = page.document.querySelector('[data-heige-role="theme-option"]');
   firstTheme.focus();
   firstTheme.dispatchEvent(new page.window.KeyboardEvent("keydown", {
@@ -277,19 +357,19 @@ test("minimized menu keeps a twenty-four-pixel target around its ten-pixel dot",
   const page = await menuWindow();
   t.after(() => page.close());
   await page.hideMenu();
-  const dot = page.document.querySelector('[data-heige-role="menu-trigger-glyph"]');
+  const dot = page.document.querySelector('[data-heige-role="menu-trigger-preview"]');
   assert.ok(Number.parseFloat(page.trigger.style.width) >= 24);
   assert.ok(Number.parseFloat(page.trigger.style.height) >= 24);
   assert.equal(dot?.style.width, "10px");
   assert.equal(dot?.style.height, "10px");
-  assert.equal(page.trigger.getAttribute("aria-label"), "显示皮肤菜单");
+  assert.equal(page.trigger.getAttribute("aria-label"), "显示主题入口");
 });
 
 test("menu panel is vertically scrollable and keeps focused actions in view", async (t) => {
   const page = await menuWindow();
   t.after(() => page.close());
-  assert.match(page.panel.style.maxHeight, /100vh.*58px/);
-  assert.equal(page.panel.style.overflowY, "auto");
+  const scroll = page.document.querySelector('[data-heige-role="theme-center-scroll"]');
+  assert.equal(scroll.parentElement, page.panel);
   const firstTheme = page.document.querySelector('[data-heige-role="theme-option"]');
   let scrollOptions = null;
   firstTheme.scrollIntoView = (options) => { scrollOptions = options; };
@@ -552,7 +632,7 @@ test("browser upload rejects byte and dimension bombs before decode", async (t) 
   });
   const alert = page.document.querySelector('[data-heige-role="upload-alert"]');
   assert.match(alert.textContent, /8 MiB|8388608/);
-  assert.equal(page.document.querySelector('[data-heige-role="menu-panel"]').style.display, "block");
+  assert.equal(page.backdrop.hidden, false);
   assert.equal(imageCalls, 0);
   assert.equal(readerCalls, 0);
 
@@ -631,6 +711,10 @@ test("validated upload scales within both canvas budgets and persists", async (t
   assert.equal(custom?.getAttribute("aria-pressed"), "true");
   assert.equal(remove?.tagName, "BUTTON");
   assert.match(remove?.getAttribute("aria-label") ?? "", /删除自定义主题.*wide/i);
+  assert.match(
+    custom.querySelector('[data-heige-role="theme-preview"]').style.backgroundImage,
+    /data:image\/webp/,
+  );
 });
 
 test("remote persistence changes close inline confirmation after restoring focus", async (t) => {
@@ -851,9 +935,14 @@ test("a menu theme choice renders immediately while durable confirmation is pend
   });
   t.after(() => page.close());
 
+  await page.openThemeCenter();
   await page.pickTheme("night-city");
 
   assert.equal(page.themeId, "night-city");
+  assert.equal(page.backdrop.hidden, false);
+  assert.equal(page.saveState.dataset.state, "saving");
+  assert.equal(page.saveState.textContent, "正在保存");
+  assert.equal(page.currentHero.dataset.themeId, "night-city");
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
   assert.equal(
     page.document.querySelector('[data-heige-theme-id="night-city"]').disabled,
@@ -870,6 +959,9 @@ test("a menu theme choice renders immediately while durable confirmation is pend
 
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
   assert.equal(page.controlRevision, 8);
+  assert.equal(page.saveState.dataset.state, "saved");
+  assert.equal(page.saveState.textContent, "已保存");
+  assert.equal(page.backdrop.hidden, false);
 });
 
 test("a menu theme choice persists the authoritative theme revision", async (t) => {
@@ -1014,6 +1106,9 @@ test("a rejected theme request leaves the renderer unchanged and refreshes its r
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
   assert.equal(page.controlRevision, 8);
   assert.equal(page.alert.textContent, "状态已发生变化，请重试");
+  assert.equal(page.currentHero.dataset.themeId, "miku-488137");
+  assert.equal(page.saveState.dataset.state, "error");
+  assert.match(page.saveState.textContent, /未保存|重试/);
   assert.equal(
     page.document.querySelector('[data-heige-theme-id="night-city"]').disabled,
     false,
@@ -1133,4 +1228,28 @@ test("storage compatibility events update theme and hidden state without broadca
   assert.equal(page.themeId, null);
   assert.equal(page.hidden, true);
   assert.equal(SharedBroadcastChannel.messages.length, 0);
+});
+
+test("theme center keeps persistence controls fixed outside its scrolling region", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const scroll = page.document.querySelector('[data-heige-role="theme-center-scroll"]');
+  const footer = page.document.querySelector('[data-heige-role="theme-center-footer"]');
+  assert.equal(scroll.contains(page.switch), false);
+  assert.equal(footer.contains(page.switch), true);
+  assert.equal(footer.contains(page.document.querySelector('[data-heige-role="hide-trigger"]')), true);
+});
+
+test("reinjection removes the old theme center style backdrop and focus handlers", async (t) => {
+  const page = await menuWindow();
+  t.after(() => page.close());
+  const oldRuntime = page.window.__heigeCodexSkinRuntime;
+  const oldStyle = page.document.querySelector('[data-heige-role="theme-center-style"]');
+  const oldBackdrop = page.backdrop;
+  await page.injectAgain();
+  assert.equal(oldStyle.isConnected, false);
+  assert.equal(oldBackdrop.isConnected, false);
+  assert.throws(() => oldRuntime.status(), /disposed|generation/i);
+  assert.equal(page.document.querySelectorAll('[data-heige-role="theme-center-style"]').length, 1);
+  assert.equal(page.document.querySelectorAll('[data-heige-role="theme-center-backdrop"]').length, 1);
 });
