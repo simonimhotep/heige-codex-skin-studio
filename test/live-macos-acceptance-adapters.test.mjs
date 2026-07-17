@@ -6,12 +6,15 @@ import test from "node:test";
 
 import {
   atomicWriteAcceptanceEvidence,
+  codexLaunchEnvironment,
   createProductionInstallAdapter,
   createProductionRepairAdapter,
   executeLiveAcceptance,
   inspectPersistenceMenu,
   listLifecycleHelperProcesses,
+  openWithCleanEnvironment,
   parseLiveConfiguration,
+  quiesceCodexForAppRepair,
   readLiveAcceptanceJournal,
   recordPreMutationFailure,
   runAppRepairRollbackThenClean,
@@ -68,6 +71,74 @@ test("live mutation needs both the opt-in and exact sequence", () => {
     HEIGE_LIVE_SEQUENCE: "rollback-then-clean",
   });
   assert.equal(config.mode, "mutation");
+});
+
+test("Codex launches with a fixed environment that cannot inherit live test gates", () => {
+  assert.deepEqual(codexLaunchEnvironment({
+    home: "/Users/example",
+    username: "example",
+    env: {
+      TMPDIR: "/private/tmp/example/",
+      NODE_TEST_CONTEXT: "child-v8",
+      HEIGE_RUN_LIVE_MACOS: "1",
+      HEIGE_LIVE_SEQUENCE: "rollback-then-clean",
+    },
+  }), {
+    HOME: "/Users/example",
+    LANG: "en_US.UTF-8",
+    LOGNAME: "example",
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    TMPDIR: "/private/tmp/example/",
+    USER: "example",
+  });
+});
+
+test("direct and launcher app opens share the same clean environment boundary", async () => {
+  const calls = [];
+  const run = async (...args) => { calls.push(args); };
+  const env = { TMPDIR: "/private/tmp/example/" };
+  await openWithCleanEnvironment(["-na", "/Applications/ChatGPT.app"], {
+    env,
+    home: "/Users/example",
+    run,
+    username: "example",
+  });
+  await openWithCleanEnvironment(["-na", "/Users/example/Applications/HeiGe 皮肤启动器.app"], {
+    env,
+    home: "/Users/example",
+    run,
+    username: "example",
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], "/usr/bin/open");
+  assert.deepEqual(calls[0][2], calls[1][2]);
+  assert.deepEqual(calls[0][2].env, {
+    HOME: "/Users/example",
+    LANG: "en_US.UTF-8",
+    LOGNAME: "example",
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    TMPDIR: "/private/tmp/example/",
+    USER: "example",
+  });
+  const source = await readFile(new URL("./live-macos-acceptance.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /run\("\/usr\/bin\/open"/);
+  assert.equal(source.match(/openWithCleanEnvironment\(/g)?.length, 3);
+});
+
+test("clean app opens reject launch-time environment injection", async () => {
+  await assert.rejects(
+    openWithCleanEnvironment([
+      "--env",
+      "HEIGE_RUN_LIVE_MACOS=1",
+      "-na",
+      "/Applications/ChatGPT.app",
+    ], {
+      home: "/Users/example",
+      run: async () => {},
+      username: "example",
+    }),
+    /Codex open arguments are invalid/,
+  );
 });
 
 test("live evidence outputs stay inside fixed result and report allowlists", () => {
@@ -281,12 +352,74 @@ test("app repair aborts on post-preflight identity drift before quitting Codex",
           : stage;
       },
       sameIdentity: (left, right) => JSON.stringify(left) === JSON.stringify(right),
-      quitCodex: async () => { calls.push(["quit"]); },
+      quiesceCodex: async () => { calls.push(["quit"]); },
       spawnCrashWorker: async () => { calls.push(["worker"]); },
     },
   }), /identity drifted/);
   assert.equal(calls.some(([kind]) => kind === "quit"), false);
   assert.equal(calls.some(([kind]) => kind === "worker"), false);
+});
+
+test("app repair waits through an exact automatic relaunch before mutating", async () => {
+  const initial = {
+    pid: 4242,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 09:00:00 2026",
+  };
+  const relaunched = {
+    ...initial,
+    pid: 4343,
+    startedAt: "Fri Jul 17 09:00:06 2026",
+  };
+  const observations = [[], [], [relaunched], [], []];
+  const stopped = [];
+  let now = 0;
+  const result = await quiesceCodexForAppRepair(initial, {
+    quietWindowMs: 2_000,
+    pollIntervalMs: 1_000,
+    maxRelaunches: 2,
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    listProcesses: async () => observations.shift() ?? [],
+    quit: async (process) => { stopped.push(process.pid); },
+  });
+  assert.deepEqual(stopped, [4242, 4343]);
+  assert.deepEqual(result, { quiescent: true, relaunches: 1 });
+});
+
+test("app repair quiescence fails closed on clock drift and multiple processes", async () => {
+  const initial = {
+    pid: 4242,
+    executablePath: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    startedAt: "Fri Jul 17 09:00:00 2026",
+  };
+  const stopped = [];
+  await assert.rejects(quiesceCodexForAppRepair(initial, {
+    quietWindowMs: 1_000,
+    pollIntervalMs: 1_000,
+    now: (() => {
+      const values = [100, 99];
+      return () => values.shift();
+    })(),
+    sleep: async () => {},
+    listProcesses: async () => [],
+    quit: async (process) => { stopped.push(process.pid); },
+  }), /clock moved backwards/);
+  assert.deepEqual(stopped, [4242]);
+
+  stopped.length = 0;
+  await assert.rejects(quiesceCodexForAppRepair(initial, {
+    quietWindowMs: 1_000,
+    pollIntervalMs: 1_000,
+    now: () => 0,
+    sleep: async () => {},
+    listProcesses: async () => [
+      { ...initial, pid: 4343 },
+      { ...initial, pid: 4444 },
+    ],
+    quit: async (process) => { stopped.push(process.pid); },
+  }), /more than one Codex process/);
+  assert.deepEqual(stopped, [4242]);
 });
 
 test("crash cycle always recovers, verifies exact restoration, then performs clean mutation", async () => {

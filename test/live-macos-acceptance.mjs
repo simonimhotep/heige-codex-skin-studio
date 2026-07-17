@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -62,6 +63,7 @@ import { listThemes } from "../src/theme-store.mjs";
 
 const execFile = promisify(execFileCallback);
 const PORT = 9341;
+const OPEN_COMMAND = "/usr/bin/open";
 const LEGACY_LABEL = "com.heige.codex-skin-watchdog";
 const CONTROLLER_LABEL = "com.heige.codex-skin-controller";
 const MAX_PLIST_BYTES = 256 * 1024;
@@ -2022,6 +2024,135 @@ async function quitExactCodex(identity, options = {}) {
   await waitForExactProcessExit(expected, options);
 }
 
+export async function quiesceCodexForAppRepair(identity, {
+  home = userInfo().homedir,
+  run = execFile,
+  listProcesses = null,
+  quit = quitExactCodex,
+  sleep = delay,
+  now = () => performance.now(),
+  quietWindowMs = 12_000,
+  pollIntervalMs = 250,
+  maxRelaunches = 4,
+} = {}) {
+  const initial = publicProcessIdentity(identity);
+  for (const [name, value] of Object.entries({
+    listProcesses: listProcesses ?? (() => {}),
+    quit,
+    sleep,
+    now,
+  })) {
+    if (typeof value !== "function") throw new TypeError(`app repair ${name} is required`);
+  }
+  if (!Number.isSafeInteger(quietWindowMs) || quietWindowMs < 1_000 || quietWindowMs > 60_000) {
+    throw new TypeError("app repair quiet window is invalid");
+  }
+  if (
+    !Number.isSafeInteger(pollIntervalMs)
+    || pollIntervalMs < 1
+    || pollIntervalMs > quietWindowMs
+  ) throw new TypeError("app repair quiet poll interval is invalid");
+  if (!Number.isSafeInteger(maxRelaunches) || maxRelaunches < 0 || maxRelaunches > 8) {
+    throw new TypeError("app repair relaunch limit is invalid");
+  }
+  const observe = listProcesses ?? (async () => {
+    const app = await resolveCodexApp({
+      home,
+      env: { HEIGE_CODEX_APP: "/Applications/ChatGPT.app" },
+      platform: "darwin",
+    });
+    return listCodexProcesses({ app, exec: run });
+  });
+  const stop = (process) => quit(process, { home, run });
+  await stop(initial);
+  let relaunches = 0;
+  let quietSince = now();
+  if (!Number.isFinite(quietSince)) throw new Error("app repair monotonic clock is invalid");
+  while (true) {
+    const processes = await observe();
+    if (!Array.isArray(processes)) throw new Error("app repair process observation is invalid");
+    if (processes.length > 1) throw new Error("more than one Codex process appeared during app repair quiescence");
+    if (processes.length === 1) {
+      const relaunched = publicProcessIdentity(processes[0]);
+      if (relaunched.executablePath !== initial.executablePath) {
+        throw new Error("Codex executable identity drifted during app repair quiescence");
+      }
+      if (relaunches >= maxRelaunches) {
+        throw new Error("Codex kept relaunching during app repair quiescence");
+      }
+      await stop(relaunched);
+      relaunches += 1;
+      quietSince = now();
+      if (!Number.isFinite(quietSince)) throw new Error("app repair monotonic clock is invalid");
+      continue;
+    }
+    const currentTime = now();
+    if (!Number.isFinite(currentTime) || currentTime < quietSince) {
+      throw new Error("app repair monotonic clock moved backwards or became invalid");
+    }
+    const elapsed = currentTime - quietSince;
+    if (elapsed >= quietWindowMs) {
+      return { quiescent: true, relaunches };
+    }
+    await sleep(Math.min(pollIntervalMs, quietWindowMs - elapsed));
+  }
+}
+
+export function codexLaunchEnvironment({
+  home = userInfo().homedir,
+  username = userInfo().username,
+  env = process.env,
+} = {}) {
+  home = canonicalAbsolute(home, "Codex launch home");
+  if (
+    typeof username !== "string"
+    || username.length === 0
+    || username.length > 256
+    || username.includes("\0")
+  ) throw new Error("Codex launch username is invalid");
+  if (env === null || typeof env !== "object" || Array.isArray(env)) {
+    throw new TypeError("Codex launch source environment is invalid");
+  }
+  const result = {
+    HOME: home,
+    LANG: "en_US.UTF-8",
+    LOGNAME: username,
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    USER: username,
+  };
+  if (env.TMPDIR !== undefined) {
+    if (typeof env.TMPDIR !== "string" || env.TMPDIR.length > 4096) {
+      throw new Error("Codex launch TMPDIR is invalid");
+    }
+    result.TMPDIR = canonicalAbsolute(env.TMPDIR, "Codex launch TMPDIR");
+  }
+  return Object.freeze(result);
+}
+
+export async function openWithCleanEnvironment(args, {
+  home = userInfo().homedir,
+  username = userInfo().username,
+  env = process.env,
+  run = execFile,
+} = {}) {
+  if (
+    !Array.isArray(args)
+    || args.length === 0
+    || args.length > 64
+    || args.some((arg) => (
+      typeof arg !== "string"
+      || arg.length === 0
+      || arg.length > 4096
+      || arg.includes("\0")
+      || arg === "--env"
+      || arg.startsWith("--env=")
+    ))
+  ) throw new TypeError("Codex open arguments are invalid");
+  return run(OPEN_COMMAND, args, {
+    env: codexLaunchEnvironment({ home, username, env }),
+  });
+}
+
 async function launchCodex(mode, {
   home = userInfo().homedir,
   run = execFile,
@@ -2036,7 +2167,7 @@ async function launchCodex(mode, {
   } else if (mode !== "native") {
     throw new Error("launch mode is invalid");
   }
-  await run("/usr/bin/open", args);
+  await openWithCleanEnvironment(args, { home, run });
   return waitForSingleCodexProcess({ mode, home, run });
 }
 
@@ -2189,7 +2320,7 @@ export async function runAppRepairRollbackThenClean({
     !sameIdentity(currentBeforeMutation, current.identity)
     || !sameIdentity(stageBeforeMutation, stage.identity)
   ) throw new Error("app identity drifted after preflight and before the first mutation");
-  await (adapters.quitCodex ?? quitExactCodex)(preflight.process, { home });
+  await (adapters.quiesceCodex ?? quiesceCodexForAppRepair)(preflight.process, { home });
   const cycle = await runCrashRecoveryCycle({
     label: "app repair",
     spawnCrashWorker: () => spawnCrash(validateLiveWorkerRequest({
@@ -2413,7 +2544,7 @@ export function createProductionOptionOneAdapters({
       const before = (await requireCurrent("native")).process;
       const launcher = await validateLauncherBundle({ home, targetRoot, run });
       await waitForLifecycleHelpersQuiescent({ home, run });
-      await run("/usr/bin/open", ["-na", launcher.appPath]);
+      await openWithCleanEnvironment(["-na", launcher.appPath], { home, run });
       await waitForExactProcessExit(before, { home, run });
       const launched = requireExpectedApp(await waitForSingleCodexProcess({ mode: "cdp", home, run }));
       if (sameProcessIdentity(launched.process, before)) throw new Error("launcher did not create a new CDP process");
