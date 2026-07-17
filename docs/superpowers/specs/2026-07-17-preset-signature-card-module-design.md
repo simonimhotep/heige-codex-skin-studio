@@ -87,7 +87,6 @@ assets/signature-card-frame.png
 ```text
 heroDataUrl
 cardArtworkDataUrl
-signatureCardFrameDataUrl
 polaroidDataUrl
 theme.name
 ```
@@ -95,10 +94,13 @@ theme.name
 渲染规则：
 
 1. 旧版完整 `polaroidDataUrl` 存在时沿用当前 `body::after` 单图逻辑。
-2. 模块模式使用 `body::before` 渲染带裁切的画芯和卡片底色。
-3. `body::after` 渲染透明相框、主题名称与 `By@HeiGe`。
-4. 两层使用相同的固定定位、尺寸、旋转角和 `pointer-events: none`。
-5. 图层位于背景之上、主题中心弹窗之下，不拦截点击。
+2. hero data URL 在当前主题 CSS 中只声明一次为 `--heige-hero-image`，主背景和默认画芯共同引用该变量。
+3. 模块模式使用 `body::before` 渲染带裁切的画芯和卡片底色。
+4. `body::after` 渲染透明相框、主题名称与 `By@HeiGe`。
+5. 两层使用相同的固定定位、尺寸、旋转角和 `pointer-events: none`。
+6. 图层位于背景之上、主题中心弹窗之下，不拦截点击。
+
+共享相框 data URL 不写入每个主题 CSS。注入器只读取和编码一次相框，菜单运行时创建独立共享样式节点，在根元素声明 `--heige-signature-card-frame-image`。所有主题通过该 CSS 变量引用同一份相框。重注入和卸载必须清理旧共享样式，防止资源残留。
 
 画芯使用 `object-fit: cover` 等价的 CSS 背景裁切。默认焦点为中心偏上，以减少人物面部被裁掉的概率。后续如有明确需求，再增加焦点配置，本次不扩展 manifest。
 
@@ -131,9 +133,10 @@ theme.name
 1. `theme-schema` 验证 hero、旧版 polaroid 和可选 cardArtwork。
 2. `injector` 读取当前主题资源，并读取一份共享相框资源。
 3. 所有资源先完成大小和图片元数据验证，再编码为 data URL。
-4. `skin-css` 根据兼容优先级生成旧版单图或新版分层 CSS。
-5. 乐观主题切换继续同步替换整段主题 CSS，签名卡与背景在同一帧更新。
-6. 后台保存确认不参与签名卡绘制，因此不会增加切换等待时间。
+4. `skin-menu` 把共享相框写入一个独立样式节点，整个菜单 payload 只保留一份相框 data URL。
+5. `skin-css` 根据兼容优先级生成旧版单图或新版分层 CSS，hero data URL 在单个主题 CSS 内只出现一次。
+6. 乐观主题切换继续同步替换整段主题 CSS，签名卡与背景在同一帧更新。
+7. 后台保存确认不参与签名卡绘制，因此不会增加切换等待时间。
 
 ## 错误处理
 
@@ -157,6 +160,7 @@ theme.name
 9. 连续主题切换后不存在旧画芯或旧相框残留。
 10. 全量测试、确定性安装包测试和本机真实切换验收继续通过。
 11. 共享相框的透明窗口包含真实 alpha 像素，且文件格式、尺寸和资源哈希稳定。
+12. 菜单注入表达式中共享相框 data URL 只出现一次，每个主题的 hero data URL 在对应 CSS 中只出现一次。
 
 ## 真实验收
 
