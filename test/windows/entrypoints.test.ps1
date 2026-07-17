@@ -661,10 +661,18 @@ try {
     Test-Case "Default WScript shortcut round-trips the complete generated schema" {
         $shortcutPath = Join-Path $script:Root "WScript Schema\HeiGe 皮肤启动器.lnk"
         New-Item -ItemType Directory -Path (Split-Path $shortcutPath -Parent) -Force | Out-Null
-        New-DefaultHeiGeShortcut -Path $shortcutPath -Target $script:ApplyBat `
-            -WorkingDirectory (Split-Path $script:ApplyBat -Parent) `
-            -Description $script:ShortcutDescription
-        $observed = Read-DefaultHeiGeShortcut -Path $shortcutPath
+        try {
+            New-DefaultHeiGeShortcut -Path $shortcutPath -Target $script:ApplyBat `
+                -WorkingDirectory (Split-Path $script:ApplyBat -Parent) `
+                -Description $script:ShortcutDescription
+        } catch {
+            throw "WScript shortcut creation failed：$($_.Exception.Message)"
+        }
+        try {
+            $observed = Read-DefaultHeiGeShortcut -Path $shortcutPath
+        } catch {
+            throw "WScript shortcut inspection failed：$($_.Exception.Message)"
+        }
         Assert-Equal $script:ApplyBat $observed.TargetPath
         Assert-Equal (Split-Path $script:ApplyBat -Parent) $observed.WorkingDirectory
         Assert-Equal $script:ShortcutDescription $observed.Description
@@ -887,12 +895,10 @@ try {
             (Join-Path $script:RepositoryRoot "scripts\windows\lib\start-menu.ps1")
         )
         Assert-Match 'launcher v1 \| current-user \| re-enable skin' $source
-        Assert-Match '\$shortcut\.Arguments\s*=\s*\$script:HeiGeStartMenuArguments' $source
-        Assert-Match '\$shortcut\.WindowStyle\s*=\s*\$script:HeiGeStartMenuWindowStyle' $source
-        Assert-Match 'IsNullOrEmpty\(\$script:HeiGeStartMenuHotkey\)' $source
-        Assert-Match '\$shortcut\.Hotkey\s*=\s*\$script:HeiGeStartMenuHotkey' $source
-        Assert-Match 'IsNullOrEmpty\(\$script:HeiGeStartMenuIconLocation\)' $source
-        Assert-Match '\$shortcut\.IconLocation\s*=\s*\$script:HeiGeStartMenuIconLocation' $source
+        Assert-False ($source -match '\$shortcut\.(?:Arguments|WindowStyle|Hotkey|IconLocation)\s*=')
+        Assert-Match 'Arguments\s*=\s*\[string\]\$shortcut\.Arguments' $source
+        Assert-Match 'WindowStyle\s*=\s*\[int\]\$shortcut\.WindowStyle' $source
+        Assert-Match 'Hotkey\s*=\s*\[string\]\$shortcut\.Hotkey' $source
         Assert-Match 'ConvertFrom-HeiGeWshIconLocation' $source
     }
 
