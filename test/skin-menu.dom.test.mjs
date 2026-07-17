@@ -838,7 +838,41 @@ test("theme native hidden and persistence ACK synchronize to a second renderer",
   assert.doesNotMatch(JSON.stringify(persistenceMessage), /token|endpoint|43123/i);
 });
 
-test("a menu theme choice waits for the authoritative theme revision before applying", async (t) => {
+test("a menu theme choice renders immediately while durable confirmation is pending", async (t) => {
+  const pending = deferredResponse();
+  const page = await menuWindow({
+    persistenceEnabled: false,
+    revision: 7,
+    entries: [
+      { id: "miku-488137", name: "Miku", accent: "#19c9e5", css: "html { color: #123456; }" },
+      { id: "night-city", name: "Night City", accent: "#4455aa", css: "html { color: #eeeeee; }" },
+    ],
+    fetch: async () => pending.promise,
+  });
+  t.after(() => page.close());
+
+  await page.pickTheme("night-city");
+
+  assert.equal(page.themeId, "night-city");
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
+  assert.equal(
+    page.document.querySelector('[data-heige-theme-id="night-city"]').disabled,
+    true,
+  );
+
+  pending.resolve(jsonResponse(200, {
+    ok: true,
+    persistenceEnabled: false,
+    revision: 8,
+    themeId: "night-city",
+  }));
+  await page.flush();
+
+  assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
+  assert.equal(page.controlRevision, 8);
+});
+
+test("a menu theme choice persists the authoritative theme revision", async (t) => {
   const requests = [];
   const page = await menuWindow({
     persistenceEnabled: false,
@@ -880,7 +914,7 @@ test("a menu theme choice waits for the authoritative theme revision before appl
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "night-city");
 });
 
-test("a renderer-blocked theme request is queued without changing the selected theme", async (t) => {
+test("a renderer-blocked theme request keeps its optimistic theme until controller confirmation", async (t) => {
   const page = await menuWindow({
     persistenceEnabled: false,
     revision: 7,
@@ -905,7 +939,7 @@ test("a renderer-blocked theme request is queued without changing the selected t
   });
   assert.match(request.requestId, /^[0-9a-f]{32}$/);
   assert.match(request.capability, /^[A-Za-z0-9_-]{43}$/);
-  assert.equal(page.themeId, "miku-488137");
+  assert.equal(page.themeId, "night-city");
   assert.equal(page.window.localStorage.getItem("heigeCodexSkinSelected"), "miku-488137");
   assert.match(page.alert.textContent, /后台确认/);
 });

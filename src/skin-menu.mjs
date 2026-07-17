@@ -923,6 +923,7 @@ export function buildSkinMenuScript({
     let controlRevision = data.control.revision;
     let pending = false;
     let themePending = false;
+    let optimisticPreviousThemeId = null;
     let controlRequestTimeout = null;
     const themeEndpoint = data.control.endpoint.slice(0, -"/v1/persistence".length) + "/v1/theme";
     const newRequestId = () => {
@@ -980,6 +981,21 @@ export function buildSkinMenuScript({
       controlRequest = null;
       return cleared;
     };
+    const renderThemeSelection = (themeId, persist = false, broadcast = false) => {
+      if (themeId === data.customId) {
+        const custom = currentCustom ?? loadCustom();
+        if (custom) applyCustomTheme(custom, persist, broadcast);
+        return;
+      }
+      if (themeId === data.nativeSel) clearTheme(persist, broadcast);
+      else setTheme(themeId, persist, broadcast);
+    };
+    const rollbackOptimisticTheme = () => {
+      if (optimisticPreviousThemeId === null) return;
+      const previousThemeId = optimisticPreviousThemeId;
+      optimisticPreviousThemeId = null;
+      renderThemeSelection(previousThemeId, false, false);
+    };
     const queueControlRequest = (request) => {
       if (controlRequest !== null) return false;
       controlRequest = request;
@@ -991,6 +1007,7 @@ export function buildSkinMenuScript({
           closeConfirmation({ restoreFocus: true });
           paintPersistence();
         } else {
+          rollbackOptimisticTheme();
           themePending = false;
           for (const item of rows.values()) item.disabled = false;
         }
@@ -1017,6 +1034,8 @@ export function buildSkinMenuScript({
         expectedRevision: requestRevision,
         themeId,
       };
+      optimisticPreviousThemeId = currentThemeId;
+      renderThemeSelection(themeId, false, false);
       themePending = true;
       let queued = false;
       hideAlert();
@@ -1054,6 +1073,7 @@ export function buildSkinMenuScript({
           const message = typeof body?.message === "string" && body.message.length <= 160
             ? body.message
             : "后台拒绝了主题选择，界面未更改";
+          rollbackOptimisticTheme();
           showAlert(message);
           return false;
         }
@@ -1069,14 +1089,17 @@ export function buildSkinMenuScript({
         }
         controlRevision = body.revision;
         publish("persistence", { enabled: persistenceEnabled, revision: controlRevision });
-        if (themeId === data.nativeSel) clearTheme(true, true);
-        else setTheme(themeId, true, true);
+        optimisticPreviousThemeId = null;
+        renderThemeSelection(themeId, true, true);
         showAlert("主题选择已保存。", "success");
         return true;
       } catch (error) {
         if (isCurrent()) {
           queued = queueControlRequest(fallbackRequest);
-          if (!queued) showAlert(safeClientError(error));
+          if (!queued) {
+            rollbackOptimisticTheme();
+            showAlert(safeClientError(error));
+          }
         }
         return false;
       } finally {
@@ -1186,6 +1209,7 @@ export function buildSkinMenuScript({
       const cleared = clearControlRequest();
       if (cleared?.action === "set-persistence") pending = false;
       if (cleared?.action === "set-theme") {
+        rollbackOptimisticTheme();
         themePending = false;
         for (const item of rows.values()) item.disabled = false;
       }
