@@ -17,6 +17,18 @@ test("builds one fast generic skin from a theme and image data URL", () => {
   assert.match(css, /data:image\/webp;base64,AAAA/);
   assert.match(css, /\.app-shell-left-panel/);
   assert.match(css, /\.composer-surface-chrome/);
+  assert.match(
+    css,
+    /\[data-local-conversation-final-assistant\]\s*\{[^}]*background:\s*transparent[^}]*box-shadow:\s*none/s,
+  );
+  assert.match(
+    css,
+    /\.composer-surface-chrome,[\s\S]*background:\s*color-mix\(in srgb, var\(--heige-surface\) 60%, transparent\)/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.composer-surface-chrome,[\s\S]*\[data-local-conversation-final-assistant\],[\s\S]*var\(--heige-surface\) 88%/,
+  );
   assert.match(css, /pointer-events:\s*none/);
   assert.doesNotMatch(css, /https?:\/\//);
 });
