@@ -31,7 +31,12 @@ import {
   resolveStudioPaths,
 } from "./constants.mjs";
 import { createSkinController } from "./controller.mjs";
-import { applySkin, removeSkin, skinStatus } from "./injector.mjs";
+import {
+  applySkin,
+  deliverUpdateCheckResult,
+  removeSkin,
+  skinStatus,
+} from "./injector.mjs";
 import {
   spawnDetachedLifecycle,
   writeLifecycleActionFile,
@@ -61,6 +66,10 @@ import {
 } from "./legacy-migration-coordinator.mjs";
 import { acquireOperationLock, withOperationLock } from "./operation-lock.mjs";
 import { installPet } from "./pet-installer.mjs";
+import {
+  createCachedUpdateChecker,
+  readCurrentPackageVersion,
+} from "./update-check.mjs";
 import {
   compareAndUpdateStudioState,
   createDefaultStudioState,
@@ -1101,6 +1110,8 @@ export async function productionController({
     }
   }
   const initial = await readStudioState(paths.statePath);
+  const currentVersion = await deps.readCurrentPackageVersion();
+  const checkForUpdate = deps.createCachedUpdateChecker({ currentVersion });
   const logger = createStudioLogger({
     path: paths.logPath,
     token: initial?.controlToken ?? "",
@@ -1114,6 +1125,12 @@ export async function productionController({
     backgroundProcess: background,
     allowInternalPersistenceEnable:
       migrationAuthorization !== null || installAuthorization !== null,
+    currentVersion,
+    checkForUpdate,
+    deliverUpdateCheckResult: (payload) => deps.deliverUpdateCheckResult({
+      port,
+      ...payload,
+    }),
     statePath: paths.statePath,
     sessionPath: paths.sessionPath,
     transitionPath: paths.transitionPath,
@@ -1178,6 +1195,7 @@ export async function productionController({
         themes: bundle.menuThemes,
         activeId: themeId === NATIVE_THEME_ID ? null : effectiveThemeId,
         port,
+        currentVersion,
         preferStored: requestPreference ?? injectionPreferStored,
         control,
         targetIds,
@@ -2079,6 +2097,9 @@ function defaults(overrides, {
     applySkin,
     removeSkin,
     skinStatus,
+    deliverUpdateCheckResult,
+    readCurrentPackageVersion,
+    createCachedUpdateChecker,
     readState: () => readStudioState(paths.statePath),
     preflightLifecycle: (input) => productionPreflight({
       ...input,

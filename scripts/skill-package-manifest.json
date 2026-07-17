@@ -206,6 +206,12 @@
       "exclude": []
     },
     {
+      "source": "src/update-check.mjs",
+      "destination": "payload/src/update-check.mjs",
+      "recursive": false,
+      "exclude": []
+    },
+    {
       "source": "src/windows-runtime.mjs",
       "destination": "payload/src/windows-runtime.mjs",
       "recursive": false,
