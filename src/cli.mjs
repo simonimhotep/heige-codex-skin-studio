@@ -1176,6 +1176,7 @@ export async function productionController({
       return deps.applySkin({
         loadedTheme: bundle.loadedTheme,
         themes: bundle.menuThemes,
+        activeId: themeId === NATIVE_THEME_ID ? null : effectiveThemeId,
         port,
         preferStored: requestPreference ?? injectionPreferStored,
         control,

@@ -103,6 +103,16 @@ test("injects the in-app switcher menu with every loaded theme", async () => {
   assert.match(FakeSession.expressions[0], /"night-city"/);
 });
 
+test("keeps the menu resources while rendering the authoritative native selection", async () => {
+  FakeSession.expressions = [];
+  const { loaded, deps } = await fixture();
+
+  await applySkin({ loadedTheme: loaded, activeId: null, port: 9341, deps });
+
+  assert.match(FakeSession.expressions[0], /"activeId":null/);
+  assert.match(FakeSession.expressions[0], /"id":"demo"/);
+});
+
 test("passes the read-only persistence control descriptor into every main menu", async () => {
   FakeSession.expressions = [];
   const { loaded, deps } = await fixture();

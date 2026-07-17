@@ -171,6 +171,7 @@ function themeEntry(resources) {
 export async function applySkin({
   loadedTheme,
   themes,
+  activeId,
   port,
   preferStored = false,
   control = null,
@@ -189,7 +190,7 @@ export async function applySkin({
     resourceSets.push(resources);
   }
   const entries = resourceSets.map(themeEntry);
-  const themeId = loadedTheme.manifest.id;
+  const themeId = activeId === undefined ? loadedTheme.manifest.id : activeId;
   // 自定义上传主题的客户端 CSS 模板：哨兵值占位，页面内替换，和内置主题同一套模板
   const cssTemplate = buildSkinCss({
     theme: {
