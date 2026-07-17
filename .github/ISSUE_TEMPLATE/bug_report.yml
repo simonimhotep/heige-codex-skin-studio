@@ -1,0 +1,55 @@
+name: "🐛 Bug 反馈"
+description: 换肤失败、注入异常、界面错乱等问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前先试两步：完全退出 Codex（确认没有残留进程）后重跑脚本；再跑一次 `doctor` 拿到诊断结果。常见问题先翻[完整手册的 FAQ](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/docs/manual.md#常见问题)。
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - macOS
+        - Windows（传统安装）
+        - Windows（Microsoft Store/MSIX）
+    validations:
+      required: true
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex Desktop 版本
+      description: Codex 设置或关于页里的版本号
+      placeholder: 例如 1.2026.xxx
+    validations:
+      required: true
+  - type: input
+    id: studio-version
+    attributes:
+      label: Skin Studio 版本
+      description: 主题中心底部显示的版本号
+      placeholder: 例如 5.2.2
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从哪个入口执行了什么，期望看到什么，实际看到什么
+      placeholder: |
+        1. 双击 install.command
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor 输出（脱敏后）
+      description: 运行 `node src/cli.mjs doctor` 或已安装目录下的 CLI，贴结果前去掉用户名等隐私信息
+      render: text
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: 截图（可选）
+      description: 界面异常时一张真机截图能省很多来回

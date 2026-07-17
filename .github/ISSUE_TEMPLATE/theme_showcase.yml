@@ -1,0 +1,38 @@
+name: "🎨 主题晒图 / 投稿"
+description: 晒出你做的主题，被选中会进 README 精选并署名
+labels: ["showcase"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        随手晒图去 [Discussions 晒图区](https://github.com/HeiGeAi/heige-codex-skin-studio/discussions) 更热闹；想正式投稿进 README 精选就用这个模板。
+  - type: input
+    id: theme-name
+    attributes:
+      label: 主题名
+      placeholder: 例如 深夜机房
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: 真机截图
+      description: 至少一张应用后的 Codex 真机截图，别用概念图代替
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: 底图来源或提示词
+      description: 自己生成的贴提示词；用现成图要说明来源和授权状态，真人或版权角色素材无法收录进精选
+    validations:
+      required: true
+  - type: dropdown
+    id: consent
+    attributes:
+      label: 是否愿意被收录进 README 精选（会署名）
+      options:
+        - 愿意
+        - 只是晒一下，不用收录
+    validations:
+      required: true

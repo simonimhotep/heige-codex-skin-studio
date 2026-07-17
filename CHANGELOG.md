@@ -1,5 +1,14 @@
 # 更新日志
 
+## 未发布
+
+### 文档与社区
+
+- README 重构为首页样式：真机大图前置，工程细节移入 `docs/manual.md`，英文文档拆分为 `README.en.md`。
+- 新增 `docs/theme-prompts.md`：8 套可直接复制的主题背景生图提示词与晒图指引。
+- 新增 `docs/promo-copy.md`：按平台整理的转发文案包。
+- 新增 Bug、功能建议、主题晒图三个 Issue 模板与 PR 模板，关闭空白 Issue，开启 Discussions 晒图区。
+
 ## 5.2.2 - 2026-07-18
 
 ### 性能优化

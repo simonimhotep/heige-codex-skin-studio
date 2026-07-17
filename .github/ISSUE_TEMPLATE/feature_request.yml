@@ -1,0 +1,23 @@
+name: "✨ 功能建议"
+description: 想要的新能力、新预设方向、体验改进
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 想要什么
+      description: 一句话说清楚想要的能力或改进
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 什么场景会用到
+      description: 你在什么情况下需要它，现在是怎么绕过去的
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: 参考（可选）
+      description: 参考图、别的工具的类似做法、链接都可以贴

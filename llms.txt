@@ -17,7 +17,10 @@
 
 ## 核心页面
 
-- [项目主页](https://github.com/HeiGeAi/heige-codex-skin-studio)：安装、使用、支持矩阵与 FAQ。
+- [项目主页](https://github.com/HeiGeAi/heige-codex-skin-studio)：真机效果、快速开始与使用须知。
+- [完整手册](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/docs/manual.md)：安装细节、生命周期语义、命令行、主题格式与全部 FAQ。
+- [主题提示词库](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/docs/theme-prompts.md)：8 套可直接复制的背景生图提示词与晒图指引。
+- [晒图区](https://github.com/HeiGeAi/heige-codex-skin-studio/discussions)：用户主题展示与交流。
 - [安全边界](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/SECURITY.md)：CDP、控制接口与漏洞报告方式。
 - [素材来源](https://github.com/HeiGeAi/heige-codex-skin-studio/blob/main/ASSET_PROVENANCE.md)：逐文件来源和授权核验状态。
 - [发布下载](https://github.com/HeiGeAi/heige-codex-skin-studio/releases)：`.skill` 与源码发布。
