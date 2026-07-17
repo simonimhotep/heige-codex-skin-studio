@@ -42,9 +42,9 @@
 | 协议 | 代码 MIT，角色素材权利归各自权利人 |
 | 最近更新 | 2026-07-16 |
 
-![真机截图：赛博都市 Miku 深色主题](docs/images/miku-cyber-live.jpg)
+![真机截图：鸣潮主题](docs/images/wuthering-live.jpg)
 
-*真机截图：赛博都市 Miku 深色主题（自定义上传，页面内自动取色）。*
+*真机截图：鸣潮 轻量主题（深色赛博场景底图 + 自动配色）。*
 
 ![真机截图：原神破晓主题](docs/images/genshin-dawn-live.jpg)
 
