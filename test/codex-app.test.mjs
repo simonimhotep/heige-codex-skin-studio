@@ -11,7 +11,9 @@ import {
   discoverCodex,
   listCodexProcesses,
   parseCodexProcessTable,
+  parseMacPsLstartRow,
   parseMacPsTable,
+  parseMacPsTreeRow,
   resolveCodexApp,
   runtimeDiagnostics,
   sameProcessIdentity,
@@ -158,6 +160,42 @@ test("the real ps command shape yields a stable process identity", () => {
     hasCdp: true,
     cdpPort: 9341,
   });
+});
+
+test("ps lstart parser accepts Chinese locale month/day merge and English padding", () => {
+  const command = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT --remote-debugging-port=9341";
+  const chinese = parseMacPsLstartRow(` 31060 六  7月/18 21:47:13 2026 ${command}`);
+  assert.deepEqual(chinese, {
+    pid: 31060,
+    startedAt: "六  7月/18 21:47:13 2026",
+    commandLine: command,
+  });
+
+  const padded = parseMacPsLstartRow(`   42 Thu Jul  9 08:01:02 2026 ${command}`);
+  assert.equal(padded.startedAt, "Thu Jul  9 08:01:02 2026");
+
+  const tree = parseMacPsTreeRow(
+    ` 31060     1 六  7月/18 21:47:13 2026 ${command}`,
+  );
+  assert.deepEqual(tree, {
+    pid: 31060,
+    ppid: 1,
+    startedAt: "六  7月/18 21:47:13 2026",
+    commandLine: command,
+  });
+
+  const app = codexInstallation("/Applications/ChatGPT.app", { platform: "darwin" });
+  const rows = parseCodexProcessTable(
+    [
+      ` 31060 六  7月/18 21:47:13 2026 ${command}`,
+      ` 31061 六  7月/18 21:47:14 2026 /usr/bin/other --remote-debugging-port=9341`,
+    ].join("\n"),
+    app,
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].pid, 31060);
+  assert.equal(rows[0].startedAt, "六  7月/18 21:47:13 2026");
+  assert.equal(rows[0].cdpPort, 9341);
 });
 
 test("parser accepts an actual ps row for the current process", { skip: process.platform !== "darwin" }, async () => {
