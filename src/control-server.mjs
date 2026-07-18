@@ -261,19 +261,37 @@ function exactRequestBody(value) {
 function exactThemeRequestBody(value) {
   if (!isPlainObject(value)) return null;
   const keys = Object.keys(value).sort();
+  const hasRequestId = keys.includes("requestId");
   if (
-    keys.length !== 2 ||
-    keys[0] !== "revision" ||
-    keys[1] !== "themeId" ||
+    !(
+      (keys.length === 2 && keys[0] === "revision" && keys[1] === "themeId") ||
+      (
+        keys.length === 3 &&
+        keys[0] === "requestId" &&
+        keys[1] === "revision" &&
+        keys[2] === "themeId"
+      )
+    ) ||
     !isNonNegativeInteger(value.revision) ||
     !(
       value.themeId === NATIVE_THEME_ID ||
       isFormalThemeId(value.themeId)
+    ) ||
+    (
+      hasRequestId &&
+      (
+        typeof value.requestId !== "string" ||
+        !/^[a-f0-9]{32}$/.test(value.requestId)
+      )
     )
   ) {
     return null;
   }
-  return { revision: value.revision, themeId: value.themeId };
+  return {
+    revision: value.revision,
+    themeId: value.themeId,
+    ...(hasRequestId ? { requestId: value.requestId } : {}),
+  };
 }
 
 function safeBody(code, state = undefined) {
@@ -661,6 +679,7 @@ async function applyThemeRequest(input, context, transaction) {
     updated = extractThemeState(await context.setThemeSelection({
       expectedRevision: input.revision,
       themeId: input.themeId,
+      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
       signal: commitSignal,
     }));
   } catch (error) {
