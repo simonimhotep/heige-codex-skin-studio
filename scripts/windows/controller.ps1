@@ -48,6 +48,39 @@ try {
         exit 0
     }
 
+    # 安装树被手删/半删后，登录任务仍会反复拉起 controller；缺失 CLI 时自注销并安静退出。
+    if ($Action -eq "run" -or $Action -eq "register" -or $Action -eq "start") {
+        $cliPath = Join-Path $script:RepositoryRoot "src\cli.mjs"
+        if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
+            $unregistered = $false
+            try {
+                Unregister-HeiGeScheduledTask -TaskName $TaskName -StateDirectory $StateDirectory `
+                    -TestMode:$testMode -PreserveHandshake | Out-Null
+                $unregistered = $true
+            } catch {
+                try {
+                    & (Join-Path $env:SystemRoot "System32\schtasks.exe") `
+                        /Delete /TN $TaskName /F 2>$null | Out-Null
+                    $unregistered = $null -eq (
+                        Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction SilentlyContinue
+                    )
+                } catch {
+                    $unregistered = $false
+                }
+            }
+            if ($unregistered) {
+                [Console]::Error.WriteLine(
+                    "HeiGe Codex Skin Studio：安装目录缺失（找不到 $cliPath），已注销常驻任务。"
+                )
+            } else {
+                [Console]::Error.WriteLine(
+                    "HeiGe Codex Skin Studio：安装目录缺失，常驻任务无法自动注销；请从源码目录运行 scripts\windows\uninstall.bat。"
+                )
+            }
+            exit 0
+        }
+    }
+
     if ($Action -eq "start") {
         if ($null -eq $ExpectedRevision -or -not $ExpectedTransitionNonce) {
             throw "start requires ExpectedRevision and ExpectedTransitionNonce"
