@@ -23,6 +23,14 @@ test("builds one fast generic skin from a theme and image data URL", () => {
   );
   assert.match(
     css,
+    /:root\[data-heige-readability="on"\]\s+\[data-local-conversation-final-assistant\]\s*\{[^}]*var\(--heige-surface\) 86%/s,
+  );
+  assert.doesNotMatch(
+    css,
+    /:root\[data-heige-readability="on"\]\s+\[data-local-conversation-final-assistant\]\s*\{[^}]*backdrop-filter:\s*blur/s,
+  );
+  assert.match(
+    css,
     /\.composer-surface-chrome,[\s\S]*background:\s*color-mix\(in srgb, var\(--heige-surface\) 60%, transparent\)/,
   );
   assert.doesNotMatch(

@@ -102,6 +102,15 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   backdrop-filter: none !important;
 }
 
+:root[data-heige-readability="on"] [data-local-conversation-final-assistant] {
+  color: var(--heige-text) !important;
+  background: color-mix(in srgb, var(--heige-surface) 86%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--heige-accent) 18%, transparent) !important;
+  border-radius: 18px;
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--heige-text) 10%, transparent) !important;
+  backdrop-filter: none !important;
+}
+
 .composer-surface-chrome,
 [data-user-message-bubble],
 [data-codex-approval-surface] {
