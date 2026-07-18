@@ -104,6 +104,12 @@ export function buildSkinMenuScript({
         ? entry.appearance
         : "system",
       previewFocus: previewFocusValue(entry.previewFocus),
+      thumbnailFocus: previewFocusValue(entry.thumbnailFocus),
+      thumbnailZoom: Number.isInteger(entry.thumbnailZoom)
+        && entry.thumbnailZoom >= 100
+        && entry.thumbnailZoom <= 400
+        ? entry.thumbnailZoom
+        : 100,
       colors: {
         accent,
         secondary: colorValue(entry.colors?.secondary, "#ed6ec1"),
@@ -541,6 +547,8 @@ export function buildSkinMenuScript({
     return preview;
   };
   const createThemeCard = (theme, onPick) => {
+    const thumbnailFocus = theme.thumbnailFocus ?? { x: 50, y: 50 };
+    const thumbnailZoom = theme.thumbnailZoom ?? 100;
     const card = document.createElement("button");
     card.type = "button";
     card.dataset.heigeRole = "theme-option";
@@ -551,6 +559,8 @@ export function buildSkinMenuScript({
       colors: theme.colors,
       label: theme.name + " 主题预览",
     });
+    preview.style.backgroundPosition = thumbnailFocus.x + "% " + thumbnailFocus.y + "%";
+    preview.style.backgroundSize = thumbnailZoom + "% auto";
     const copy = document.createElement("span");
     copy.dataset.heigeRole = "theme-card-copy";
     copy.style.cssText = "align-self:center;min-width:0;";
@@ -889,6 +899,8 @@ export function buildSkinMenuScript({
     const preview = theme ? previewFromGeneratedCss(theme.css) : custom?.dataUrl ?? null;
     currentHero.dataset.themeId = themeId;
     const previewFocus = theme?.previewFocus ?? { x: 50, y: 50 };
+    const thumbnailFocus = theme?.thumbnailFocus ?? { x: 50, y: 50 };
+    const thumbnailZoom = theme?.thumbnailZoom ?? 100;
     if (custom !== null) {
       currentHero.style.backgroundPosition = "center, center";
       currentHero.style.backgroundSize = "100% 100%, contain";
@@ -910,6 +922,12 @@ export function buildSkinMenuScript({
       card.querySelector('[data-heige-role="theme-check"]')?.toggleAttribute("hidden", !selected);
     }
     const triggerUrl = theme === undefined ? custom?.dataUrl ?? null : previewFromGeneratedCss(theme.css);
+    triggerPreview.style.backgroundPosition = theme === undefined
+      ? "center"
+      : thumbnailFocus.x + "% " + thumbnailFocus.y + "%";
+    triggerPreview.style.backgroundSize = theme === undefined
+      ? "cover"
+      : thumbnailZoom + "% auto";
     triggerPreview.style.backgroundImage = triggerUrl === null
       ? "linear-gradient(135deg,#26343b,#98a4a8)"
       : "url(" + JSON.stringify(triggerUrl) + ")";

@@ -231,6 +231,8 @@ test("theme center renders native upload and built-in preview cards", async (t) 
         name: "Miku",
         accent: "#19c9e5",
         previewFocus: { x: 50, y: 33 },
+        thumbnailFocus: { x: 66, y: 31 },
+        thumbnailZoom: 350,
         colors: { accent: "#19c9e5", secondary: "#ed6ec1", surface: "#f5f6fc", text: "#122c60" },
         css: '#root{background:url("data:image/webp;base64,QUJDRA==")}',
       },
@@ -251,9 +253,14 @@ test("theme center renders native upload and built-in preview cards", async (t) 
   const cards = [...page.document.querySelectorAll('[data-heige-role="theme-option"]')];
   assert.equal(cards.length, 2);
   assert.match(cards[0].querySelector('[data-heige-role="theme-preview"]').style.backgroundImage, /data:image\/webp/);
+  assert.equal(cards[0].querySelector('[data-heige-role="theme-preview"]').style.backgroundPosition, "66% 31%");
+  assert.equal(cards[0].querySelector('[data-heige-role="theme-preview"]').style.backgroundSize, "350% auto");
   assert.match(cards[1].querySelector('[data-heige-role="theme-preview"]').dataset.fallbackColors, /#4455aa/i);
   assert.equal(page.currentHero.dataset.themeId, "miku-488137");
   assert.equal(page.currentHero.style.backgroundPosition, "50% 33%");
+  const triggerPreview = page.document.querySelector('[data-heige-role="menu-trigger-preview"]');
+  assert.equal(triggerPreview.style.backgroundPosition, "66% 31%");
+  assert.equal(triggerPreview.style.backgroundSize, "350% auto");
   await page.pickTheme("night-city");
   assert.equal(page.currentHero.style.backgroundPosition, "50% 17%");
   const appearanceHelp = page.document.querySelector('[data-heige-role="appearance-help"]');

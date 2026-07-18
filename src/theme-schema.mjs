@@ -122,6 +122,37 @@ function normalizePreviewFocus(previewFocus) {
   return { x: previewFocus.x, y: previewFocus.y };
 }
 
+function normalizeThumbnailZoom(thumbnailZoom) {
+  if (thumbnailZoom == null) return 100;
+  if (
+    !Number.isInteger(thumbnailZoom)
+    || thumbnailZoom < 100
+    || thumbnailZoom > 400
+  ) {
+    throw new Error("theme thumbnail zoom must be an integer from 100 through 400");
+  }
+  return thumbnailZoom;
+}
+
+function normalizeThumbnailFocus(thumbnailFocus) {
+  if (thumbnailFocus == null) return { x: 50, y: 50 };
+  if (
+    !isRecord(thumbnailFocus)
+    || Object.keys(thumbnailFocus).length !== 2
+    || !Object.hasOwn(thumbnailFocus, "x")
+    || !Object.hasOwn(thumbnailFocus, "y")
+    || !Number.isInteger(thumbnailFocus.x)
+    || !Number.isInteger(thumbnailFocus.y)
+    || thumbnailFocus.x < 0
+    || thumbnailFocus.x > 100
+    || thumbnailFocus.y < 0
+    || thumbnailFocus.y > 100
+  ) {
+    throw new Error("theme thumbnail focus must contain integer x and y values from 0 through 100");
+  }
+  return { x: thumbnailFocus.x, y: thumbnailFocus.y };
+}
+
 export function validateThemeManifest(input) {
   if (!isRecord(input)) {
     throw new Error("theme manifest must be an object");
@@ -149,6 +180,8 @@ export function validateThemeManifest(input) {
     polaroid: input.polaroid === undefined || input.polaroid === null ? null : normalizeAssetPath(input.polaroid, "polaroid"),
     appearance,
     previewFocus: normalizePreviewFocus(input.previewFocus),
+    thumbnailFocus: normalizeThumbnailFocus(input.thumbnailFocus),
+    thumbnailZoom: normalizeThumbnailZoom(input.thumbnailZoom),
     colors: normalizeColors(input.colors),
     copy: normalizeCopy(input.copy),
   };

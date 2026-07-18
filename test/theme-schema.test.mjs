@@ -53,6 +53,8 @@ test("normalizes the minimal theme and supplies color defaults", () => {
     polaroid: null,
     appearance: "system",
     previewFocus: { x: 50, y: 50 },
+    thumbnailFocus: { x: 50, y: 50 },
+    thumbnailZoom: 100,
     colors: {
       accent: "#4BC2E0",
       secondary: "#AD7ED5",
@@ -81,6 +83,40 @@ test("normalizes and validates the current-theme preview focus", () => {
     assert.throws(
       () => validateThemeManifest({ ...minimalManifest, previewFocus }),
       /preview focus/,
+    );
+  }
+});
+
+test("normalizes and validates the theme thumbnail zoom", () => {
+  assert.equal(
+    validateThemeManifest({ ...minimalManifest, thumbnailZoom: 350 }).thumbnailZoom,
+    350,
+  );
+  for (const thumbnailZoom of [99, 401, 150.5, "350"]) {
+    assert.throws(
+      () => validateThemeManifest({ ...minimalManifest, thumbnailZoom }),
+      /thumbnail zoom/,
+    );
+  }
+});
+
+test("normalizes and validates the theme thumbnail focus", () => {
+  assert.deepEqual(
+    validateThemeManifest({
+      ...minimalManifest,
+      thumbnailFocus: { x: 66, y: 31 },
+    }).thumbnailFocus,
+    { x: 66, y: 31 },
+  );
+  for (const thumbnailFocus of [
+    { x: -1, y: 50 },
+    { x: 50, y: 101 },
+    { x: 50.5, y: 50 },
+    { x: 50, y: 50, z: 1 },
+  ]) {
+    assert.throws(
+      () => validateThemeManifest({ ...minimalManifest, thumbnailFocus }),
+      /thumbnail focus/,
     );
   }
 });

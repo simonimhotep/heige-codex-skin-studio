@@ -24,11 +24,15 @@
 const requiredPresets = new Map([
   ["dragonball-nimbus", {
     name: "龙珠 · 筋斗云",
-    previewFocus: { x: 72, y: 43 },
+    previewFocus: { x: 72, y: 24 },
+    thumbnailFocus: { x: 66, y: 31 },
+    thumbnailZoom: 350,
   }],
   ["dragonball-super-saiyan", {
     name: "龙珠 · 超级赛亚人",
-    previewFocus: { x: 67, y: 43 },
+    previewFocus: { x: 67, y: 3 },
+    thumbnailFocus: { x: 67, y: 15 },
+    thumbnailZoom: 400,
   }],
 ]);
 
@@ -79,7 +83,9 @@ Expected: 两张输出均为 1600×900，且每张小于 1 MB。
   "name": "龙珠 · 筋斗云",
   "hero": "hero.webp",
   "appearance": "light",
-  "previewFocus": { "x": 72, "y": 43 },
+  "previewFocus": { "x": 72, "y": 24 },
+  "thumbnailFocus": { "x": 66, "y": 31 },
+  "thumbnailZoom": 350,
   "colors": {
     "accent": "#4FC3F7",
     "secondary": "#F6C445",
@@ -98,7 +104,9 @@ Expected: 两张输出均为 1600×900，且每张小于 1 MB。
   "name": "龙珠 · 超级赛亚人",
   "hero": "hero.webp",
   "appearance": "light",
-  "previewFocus": { "x": 67, "y": 43 },
+  "previewFocus": { "x": 67, "y": 3 },
+  "thumbnailFocus": { "x": 67, "y": 15 },
+  "thumbnailZoom": 400,
   "colors": {
     "accent": "#F5C451",
     "secondary": "#52C7F2",

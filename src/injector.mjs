@@ -164,6 +164,8 @@ function themeEntry(resources) {
     accent: loadedTheme.manifest.colors?.accent,
     appearance: loadedTheme.manifest.appearance,
     previewFocus: { ...loadedTheme.manifest.previewFocus },
+    thumbnailFocus: { ...loadedTheme.manifest.thumbnailFocus },
+    thumbnailZoom: loadedTheme.manifest.thumbnailZoom,
     colors: { ...loadedTheme.manifest.colors },
     css: buildSkinCss({
       theme: loadedTheme.manifest,
