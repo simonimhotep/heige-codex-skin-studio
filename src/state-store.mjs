@@ -244,8 +244,15 @@ async function inspectPrivateJsonPath(path) {
   enforcePosixFileSecurity(fileStats, "file");
   if (process.platform === "win32") {
     const security = windowsSecurityAdapter();
-    await security.verifyDirectory(dirname(path));
-    await security.verifyFile(path);
+    if (typeof security.batch === "function") {
+      await security.batch([
+        { action: "verify-directory", path: dirname(path) },
+        { action: "verify-file", path },
+      ]);
+    } else {
+      await security.verifyDirectory(dirname(path));
+      await security.verifyFile(path);
+    }
   }
   return fileStats;
 }
@@ -306,8 +313,15 @@ async function ensurePrivateParent(path) {
     }
     if (process.platform === "win32") {
       const security = windowsSecurityAdapter();
-      if (created) await security.protectDirectory(directory);
-      await security.verifyDirectory(directory);
+      if (typeof security.batch === "function") {
+        const operations = [];
+        if (created) operations.push({ action: "protect-directory", path: directory });
+        operations.push({ action: "verify-directory", path: directory });
+        await security.batch(operations);
+      } else {
+        if (created) await security.protectDirectory(directory);
+        await security.verifyDirectory(directory);
+      }
     } else {
       await chmod(directory, 0o700);
       await syncDirectory(directory);
@@ -356,8 +370,15 @@ async function atomicWriteJson(path, value, { faultAt } = {}) {
 
     if (process.platform === "win32") {
       const security = windowsSecurityAdapter();
-      await security.protectFile(temporary);
-      await security.verifyFile(temporary);
+      if (typeof security.batch === "function") {
+        await security.batch([
+          { action: "protect-file", path: temporary },
+          { action: "verify-file", path: temporary },
+        ]);
+      } else {
+        await security.protectFile(temporary);
+        await security.verifyFile(temporary);
+      }
     }
 
     if (faultAt === "after-temp-sync") {
