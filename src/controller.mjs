@@ -350,6 +350,9 @@ function normalizedDependencies(input) {
       ? null
       : requireFunction(input.restartIntoCdp, "restartIntoCdp"),
     validatePortOwner: requireFunction(input.validatePortOwner, "validatePortOwner"),
+    discardPortProof: input.discardPortProof === undefined
+      ? null
+      : requireFunction(input.discardPortProof, "discardPortProof"),
     inspectSkin: input.inspectSkin,
     validateThemeSelection: input.validateThemeSelection === undefined
       ? async () => false
@@ -374,6 +377,7 @@ function normalizedDependencies(input) {
     newTransitionNonce: input.newTransitionNonce ?? randomUUID,
     fault: input.fault ?? (async () => {}),
     logger: input.logger ?? noopLogger(),
+    observe: input.observe ?? (async () => {}),
     launcherName: input.launcherName ?? "HeiGe 皮肤启动器",
     controlPort: input.controlPort ?? 0,
     currentVersion: input.currentVersion ?? "0.0.0",
@@ -382,6 +386,9 @@ function normalizedDependencies(input) {
     }),
     deliverUpdateCheckResult: input.deliverUpdateCheckResult ?? (async () => {
       throw new Error("update result delivery is unavailable");
+    }),
+    deliverThemeSelectionResult: input.deliverThemeSelectionResult ?? (async () => {
+      throw new Error("theme result delivery is unavailable");
     }),
   });
 }
@@ -484,14 +491,31 @@ function rendererStatusIsHealthy(value, state) {
     const menu = value.menu;
     const persistenceEnabled = value.persistenceEnabled;
     const revision = value.revision;
+    const themeTransitionPending = value.themeTransitionPending === true;
     if (
       installed !== true ||
       typeof generation !== "string" ||
       !RENDERER_GENERATION.test(generation) ||
       menu !== true ||
-      persistenceEnabled !== state.persistenceEnabled ||
-      revision !== state.revision
+      persistenceEnabled !== state.persistenceEnabled
     ) {
+      return false;
+    }
+    // 主题切换提交中：乐观 themeId 已变、revision 尚未追上，禁止因此 reinject 拆掉主题中心。
+    if (themeTransitionPending) {
+      if (mode === "active" && themeId === LOCAL_CUSTOM_THEME_ID) return true;
+      if (state.selectedThemeId === NATIVE_THEME_ID) {
+        return mode === "native" ||
+          themeId === null ||
+          themeId === NATIVE_THEME_ID ||
+          typeof themeId === "string";
+      }
+      return mode === "active" && (
+        themeId === state.selectedThemeId ||
+        (typeof themeId === "string" && themeId.length > 0)
+      );
+    }
+    if (revision !== state.revision) {
       return false;
     }
     if (mode === "active" && themeId === LOCAL_CUSTOM_THEME_ID) return true;
@@ -601,6 +625,21 @@ async function safeLog(logger, level, event, value) {
   } catch {}
 }
 
+async function safeObserve(observer, event, value) {
+  if (typeof observer !== "function") return;
+  try {
+    await observer(event, value);
+  } catch {}
+}
+
+function normalizeThemeRequestId(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !MENU_REQUEST_ID.test(value)) {
+    throw new Error("theme requestId is invalid");
+  }
+  return value;
+}
+
 export function createSkinController(input) {
   const deps = normalizedDependencies(input);
   let server = null;
@@ -608,6 +647,9 @@ export function createSkinController(input) {
   let lastKnownState = null;
   let consecutiveFailures = 0;
   let handoffRequested = false;
+  // requestId -> { promise, settled, joinedOnly, result?, error? }
+  const themeCommitRegistry = new Map();
+  const THEME_COMMIT_RETENTION_MS = 30_000;
 
   const probeProcess = async () => normalizeProcessProbe(await deps.probeCurrentProcess());
 
@@ -646,8 +688,11 @@ export function createSkinController(input) {
     }
   };
 
-  const assertPortOwner = async (processIdentity) => {
-    if (processIdentity === null || await deps.validatePortOwner(processIdentity) !== true) {
+  const assertPortOwner = async (processIdentity, options) => {
+    if (
+      processIdentity === null ||
+      await deps.validatePortOwner(processIdentity, options) !== true
+    ) {
       throw new Error("CDP port is not owned by the exact Codex process");
     }
   };
@@ -1043,7 +1088,12 @@ export function createSkinController(input) {
         !sessionMatches
       ) return null;
 
-      await assertPortOwner(before.process);
+      // The healthy path performs another exact process probe below. Let platform
+      // adapters reuse this just-captured identity for the adjacent port check,
+      // while retaining the trailing probe that detects PID/process drift.
+      await assertPortOwner(before.process, {
+        reuseCurrentProcessSnapshot: true,
+      });
       const observedHealth = await deps.inspectSkin({
         purpose: "renderer-control-request",
         expected: {
@@ -1084,6 +1134,11 @@ export function createSkinController(input) {
       });
     } catch {
       return null;
+    } finally {
+      // Drop any unused Windows port proof left by the trailing process probe.
+      if (typeof deps.discardPortProof === "function") {
+        try { deps.discardPortProof(); } catch {}
+      }
     }
   };
 
@@ -1371,7 +1426,7 @@ export function createSkinController(input) {
     rendererCapability: request.capability,
   });
 
-  const setThemeSelection = async ({
+  const executeThemeSelection = async ({
     expectedRevision,
     themeId,
     signal,
@@ -1390,9 +1445,19 @@ export function createSkinController(input) {
       throw new Error("themeId is invalid");
     }
     if (signal?.aborted) throw signal.reason ?? new Error("theme selection request aborted");
+    const startedAt = performance.now();
+    const mark = (label, from) => {
+      void safeObserve(deps.observe, "theme_selection_phase", {
+        phase: label,
+        elapsedMs: Math.round(performance.now() - from),
+      });
+    };
     return deps.withLease("controller:set-theme-selection", async (lease) => {
+      const leaseAt = performance.now();
+      mark("lease", startedAt);
       const state = validateControlState(await deps.readState());
       lastKnownState = state;
+      mark("read_state", leaseAt);
       if (
         rendererCapability !== null &&
         !sameControlCapability(rendererCapability, state.controlToken)
@@ -1405,11 +1470,16 @@ export function createSkinController(input) {
         `state revision is ${state.revision}`,
         state,
       );
+      const runtimeAt = performance.now();
       const processIdentity = await probeProcess();
       await assertPortOwner(processIdentity);
+      mark("runtime", runtimeAt);
+      const themeAt = performance.now();
       if (themeId !== NATIVE_THEME_ID && await deps.validateThemeSelection(themeId) !== true) {
         throw new Error("theme selection is not installed or valid");
       }
+      mark("theme_validation", themeAt);
+      const stateAt = performance.now();
       const updated = validateControlState(await deps.compareAndUpdate({
         expectedRevision,
         mutate: (current) => ({
@@ -1419,6 +1489,8 @@ export function createSkinController(input) {
         }),
       }, lease));
       lastKnownState = updated;
+      mark("state_write", stateAt);
+      const sessionAt = performance.now();
       const session = sessionForState(updated, processIdentity, {
         keepUntilProcessExit: !updated.persistenceEnabled,
       });
@@ -1428,8 +1500,55 @@ export function createSkinController(input) {
         // Studio state is authoritative. Reconciliation repairs this derived cache.
         await safeLog(deps.logger, "warn", "theme_session_cache_write_failed", error);
       }
+      mark("session_write", sessionAt);
+      void safeObserve(deps.observe, "theme_selection_phase", {
+        phase: "total",
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
+      await safeLog(deps.logger, "info", "theme_selection_committed", {
+        revision: updated.revision,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
       return publicThemeState(updated);
     });
+  };
+
+  const setThemeSelection = async (request = {}, options = {}) => {
+    const requestId = normalizeThemeRequestId(request.requestId);
+    if (requestId === null) {
+      return executeThemeSelection(request, options);
+    }
+    const existing = themeCommitRegistry.get(requestId);
+    if (existing !== undefined) {
+      existing.joinedOnly = true;
+      return existing.promise;
+    }
+    const entry = {
+      settled: false,
+      joinedOnly: false,
+      result: null,
+      error: null,
+      promise: null,
+    };
+    entry.promise = (async () => {
+      try {
+        const value = await executeThemeSelection(request, options);
+        entry.result = value;
+        return value;
+      } catch (error) {
+        entry.error = error;
+        throw error;
+      } finally {
+        entry.settled = true;
+        setTimeout(() => {
+          if (themeCommitRegistry.get(requestId) === entry) {
+            themeCommitRegistry.delete(requestId);
+          }
+        }, THEME_COMMIT_RETENTION_MS).unref?.();
+      }
+    })();
+    themeCommitRegistry.set(requestId, entry);
+    return entry.promise;
   };
   setThemeSelectionPublic = (request) => setThemeSelection(request);
   setThemeSelectionFromRenderer = (request) => setThemeSelection(request, {
@@ -1478,11 +1597,24 @@ export function createSkinController(input) {
           return result("handoff", mode, lastKnownState);
         }
       } else if (request.action === "set-theme") {
-        await setThemeSelectionFromRenderer({
+        // 与 HTTP 共用 requestId 时只加入已有提交（不再次 CAS/主题校验/进程探测），
+        // 提交成功后立刻 ACK 面板，避免 reinject 较慢时 兜底超时误报「未保存」。
+        const updated = await setThemeSelectionFromRenderer({
           expectedRevision: request.expectedRevision,
           themeId: request.themeId,
           capability: request.capability,
+          requestId: request.requestId,
         });
+        try {
+          await deps.deliverThemeSelectionResult({
+            requestId: request.requestId,
+            themeId: updated.selectedThemeId,
+            revision: updated.revision,
+            persistenceEnabled: updated.persistenceEnabled,
+          });
+        } catch (error) {
+          await safeLog(deps.logger, "warn", "theme_selection_ack_failed", error);
+        }
       }
       return runSafe(
         "controller:ack-renderer-request",
