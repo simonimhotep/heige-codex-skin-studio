@@ -530,6 +530,9 @@ try {
         Assert-Match 'Start-HeiGeScheduledTask' $controllerSource
         Assert-Match 'Unregister-HeiGeScheduledTask' $controllerSource
         Assert-Match '\-PreserveHandshake' $controllerSource
+        Assert-Match '安装目录缺失' $controllerSource
+        Assert-Match 'schtasks\.exe' $controllerSource
+        Assert-Match '无法自动注销' $controllerSource
         Assert-False ($source -match 'WaitForExit\(500\)|exitedDuringStartup')
         Assert-False ($source -match 'Write-HeiGeControllerHandshake|Read-HeiGeControllerHandshake|Assert-HeiGeControllerHandshake')
         Assert-False ($source -match 'Start-CodexWithCdp|Stop-Process|taskkill')
