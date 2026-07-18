@@ -101,6 +101,10 @@ async function seedLock(lockPath, record = ownerRecord()) {
   return record;
 }
 
+const skipPosixLock = process.platform === "win32"
+  ? "POSIX file-lock protocol is not used on win32"
+  : false;
+
 async function exists(path) {
   return stat(path).then(
     () => true,
@@ -197,7 +201,9 @@ async function assertOnlyReachableArtifacts(lockPath, upperBound) {
   );
 }
 
-test("a live owner is never stolen even with a stale heartbeat", async (t) => {
+test("a live owner is never stolen even with a stale heartbeat", {
+  skip: skipPosixLock,
+}, async (t) => {
   const { lockPath } = await fixture(t);
   const stale = ownerRecord({ heartbeat: "2000-01-01T00:00:00.000Z" });
   await seedLock(lockPath, stale);
@@ -214,7 +220,9 @@ test("a live owner is never stolen even with a stale heartbeat", async (t) => {
   assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), stale);
 });
 
-test("the protected action never runs when lock acquisition fails", async (t) => {
+test("the protected action never runs when lock acquisition fails", {
+  skip: skipPosixLock,
+}, async (t) => {
   const { lockPath } = await fixture(t);
   await seedLock(lockPath);
   let protectedActionRan = false;
@@ -1034,7 +1042,10 @@ test("a low compaction threshold keeps repeated short leases bounded", async (t)
   );
 });
 
-test("checkpoint compaction fences a contender linked from the old chain", async (t) => {
+test("checkpoint compaction fences a contender linked from the old chain", {
+  // Windows directory locks do not run the POSIX checkpoint compaction hooks.
+  skip: process.platform === "win32",
+}, async (t) => {
   const { lockPath } = await fixture(t);
   const released = await acquireOperationLock(acquisitionOptions(lockPath));
   await released.release();
@@ -1092,7 +1103,9 @@ test("checkpoint compaction fences a contender linked from the old chain", async
   assert.equal((await readTail(lockPath)).owner.nonce, checkpoint.nonce);
 });
 
-test("checkpoint failures after rename leave a released checkpoint, never an ownerless live lock", async (t) => {
+test("checkpoint failures after rename leave a released checkpoint, never an ownerless live lock", {
+  skip: process.platform === "win32",
+}, async (t) => {
   for (const faultAt of [
     "after-compact-rename",
     "after-compact-sync",
@@ -1127,7 +1140,9 @@ test("checkpoint failures after rename leave a released checkpoint, never an own
   }
 });
 
-test("checkpoint failure and checkpoint rollback failure are both preserved", async (t) => {
+test("checkpoint failure and checkpoint rollback failure are both preserved", {
+  skip: process.platform === "win32",
+}, async (t) => {
   const { lockPath } = await fixture(t);
   const initial = await acquireOperationLock(acquisitionOptions(lockPath));
   await initial.release();
@@ -1653,7 +1668,9 @@ test("post-publication checkpoint hard exits keep every complete artifact class 
   }
 });
 
-test("handled checkpoint publication faults keep complete artifacts bounded", async (t) => {
+test("handled checkpoint publication faults keep complete artifacts bounded", {
+  skip: process.platform === "win32",
+}, async (t) => {
   for (const stage of ["after-compact-rename", "after-compact-sync"]) {
     await t.test(stage, async (subtest) => {
       const { lockPath } = await fixture(subtest);
@@ -1686,7 +1703,9 @@ test("handled checkpoint publication faults keep complete artifacts bounded", as
   }
 });
 
-test("final artifact collection preserves a racing inode replacement", async (t) => {
+test("final artifact collection preserves a racing inode replacement", {
+  skip: process.platform === "win32",
+}, async (t) => {
   const { root, lockPath } = await fixture(t);
   const initial = await acquireOperationLock(acquisitionOptions(lockPath));
   await initial.release();
@@ -1735,7 +1754,9 @@ test("final artifact collection preserves a racing inode replacement", async (t)
   assert.deepEqual(JSON.parse(await readFile(candidatePath, "utf8")), replacement);
 });
 
-test("a failed post-tombstone reachability check restores the exact candidate", async (t) => {
+test("a failed post-tombstone reachability check restores the exact candidate", {
+  skip: process.platform === "win32",
+}, async (t) => {
   const { lockPath } = await fixture(t);
   const initial = await acquireOperationLock(acquisitionOptions(lockPath));
   await initial.release();
