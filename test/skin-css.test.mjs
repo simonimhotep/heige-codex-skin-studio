@@ -19,15 +19,27 @@ test("builds one fast generic skin from a theme and image data URL", () => {
   assert.match(css, /\.composer-surface-chrome/);
   assert.match(
     css,
-    /\[data-local-conversation-final-assistant\]\s*\{[^}]*background:\s*transparent[^}]*box-shadow:\s*none/s,
+    /\[data-local-conversation-final-assistant\],\s*\[data-response-annotation-conversation\]\s*\{[^}]*background:\s*transparent[^}]*box-shadow:\s*none/s,
   );
   assert.match(
     css,
-    /:root\[data-heige-readability="on"\]\s+\[data-local-conversation-final-assistant\]\s*\{[^}]*var\(--heige-surface\) 86%/s,
+    /:root\[data-heige-readability="on"\]\s+\[data-response-annotation-conversation\]\s*\{[^}]*var\(--heige-surface\) 90%/s,
   );
   assert.doesNotMatch(
     css,
-    /:root\[data-heige-readability="on"\]\s+\[data-local-conversation-final-assistant\]\s*\{[^}]*backdrop-filter:\s*blur/s,
+    /:root\[data-heige-readability="on"\]\s+\[data-local-conversation-final-assistant\]\s*\{/,
+  );
+  assert.match(
+    css,
+    /:root\[data-heige-readability="on"\]\s+\[data-response-annotation-conversation\]\s*\{[^}]*box-sizing:\s*border-box[^}]*border-radius:\s*22px[^}]*padding:\s*14px 16px 12px/s,
+  );
+  assert.match(
+    css,
+    /:root\[data-heige-readability="on"\]\s+\[data-response-annotation-conversation\]\s*\{[^}]*box-shadow:\s*none[^}]*backdrop-filter:\s*none/s,
+  );
+  assert.doesNotMatch(
+    css,
+    /:root\[data-heige-readability="on"\]\s+\[data-response-annotation-conversation\]\s*\{[^}]*backdrop-filter:\s*blur/s,
   );
   assert.match(
     css,

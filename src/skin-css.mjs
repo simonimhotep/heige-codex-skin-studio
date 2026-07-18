@@ -95,19 +95,22 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   background: linear-gradient(180deg, transparent 0 40%, color-mix(in srgb, var(--heige-surface) 74%, transparent) 100%) !important;
 }
 
-[data-local-conversation-final-assistant] {
+[data-local-conversation-final-assistant],
+[data-response-annotation-conversation] {
   background: transparent !important;
   border-color: transparent !important;
   box-shadow: none !important;
   backdrop-filter: none !important;
 }
 
-:root[data-heige-readability="on"] [data-local-conversation-final-assistant] {
+:root[data-heige-readability="on"] [data-response-annotation-conversation] {
+  box-sizing: border-box;
   color: var(--heige-text) !important;
-  background: color-mix(in srgb, var(--heige-surface) 86%, transparent) !important;
+  background: color-mix(in srgb, var(--heige-surface) 90%, transparent) !important;
   border: 1px solid color-mix(in srgb, var(--heige-accent) 18%, transparent) !important;
-  border-radius: 18px;
-  box-shadow: 0 8px 26px color-mix(in srgb, var(--heige-text) 10%, transparent) !important;
+  border-radius: 22px;
+  padding: 14px 16px 12px;
+  box-shadow: none !important;
   backdrop-filter: none !important;
 }
 
