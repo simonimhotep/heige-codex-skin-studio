@@ -77,7 +77,7 @@
 open "<仓库路径>/scripts/install.command"
 ```
 
-装完默认应用 Miku 预设。之后所有切换都在 Codex 顶部中间的 🎨 菜单里完成：10 套内置主题、原生界面、深浅外观联动，即点即换。应用皮肤时 Codex 会正常退出并以本机调试模式重新打开，当前任务先保存。
+装完默认应用 Miku 预设。之后所有切换都在 Codex 顶部中间的 🎨 菜单里完成：12 套内置主题、原生界面、深浅外观联动，即点即换。应用皮肤时 Codex 会正常退出并以本机调试模式重新打开，当前任务先保存。
 
 Windows 用 `scripts\windows\install.bat` 安装；日常入口是 `scripts/windows/apply.ps1`、兼容名 `scripts/windows/enable-skin.bat`（只恢复当前会话）、`scripts/windows/pause.ps1`、`scripts/windows/resume.ps1` 和 `scripts/windows/restore.ps1`，Microsoft Store/MSIX 真机待验证，细节见[完整手册](docs/manual.md)。
 
@@ -93,11 +93,15 @@ Windows 用 `scripts\windows\install.bat` 安装；日常入口是 `scripts/wind
 
 一个实话：「自定义图片」是单个本地快捷槽，再次上传会覆盖；它不是可分发的正式主题，也不会改写启动器记录的最近正式主题。renderer 本地存储可在自动补针或常驻启动时继续显示该快捷图，清除本地数据后会丢失。想要能保存、能切换的主题，走第 2 或第 3 条路。
 
-## 内置 10 套主题
+## 内置 12 套主题
 
-高精度定制的 `Miku 488137` 打底，原神、鸣潮、火影忍者、恋与深空各两款轻量主题，外加彩蛋预设「大佬 · 点烟」。预设主题会同步切换 Codex 自身的浅色或深色外观。安装包里还带可选的 `Miku Future` 动画桌面宠物，装不装由你，不覆盖 Codex 内置宠物。
+高精度定制的 `Miku 488137` 打底，原神、鸣潮、火影忍者、恋与深空各两款轻量主题，再加入「龙珠 · 筋斗云」「龙珠 · 超级赛亚人」和彩蛋预设「大佬 · 点烟」。预设主题会同步切换 Codex 自身的浅色或深色外观。安装包里还带可选的 `Miku Future` 动画桌面宠物，装不装由你，不覆盖 Codex 内置宠物。
 
-这些 4K 概念图展示「一张图就是一个皮肤方向」的设计效果，内置的 8 款轻量预设使用同场景的无文字干净壁纸版本：
+这些概念图展示「一张图就是一个皮肤方向」的设计效果，内置的 10 款轻量预设使用无文字干净壁纸版本：
+
+| 龙珠 · 筋斗云 | 龙珠 · 超级赛亚人 |
+| --- | --- |
+| ![龙珠筋斗云主题主视觉](themes/dragonball-nimbus/hero.webp) | ![龙珠超级赛亚人主题主视觉](themes/dragonball-super-saiyan/hero.webp) |
 
 | 原神 | 原神 |
 | --- | --- |
