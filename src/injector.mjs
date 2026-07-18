@@ -1,6 +1,7 @@
 import { extname } from "node:path";
 
 import { CdpSession, fetchRendererTargets, waitForRendererTargets } from "./cdp-client.mjs";
+import { NATIVE_THEME_ID } from "./constants.mjs";
 import { buildSkinCss } from "./skin-css.mjs";
 import { buildSkinMenuScript, CSS_SENTINELS } from "./skin-menu.mjs";
 import { classifyCodexTargets } from "./target-classifier.mjs";
@@ -11,6 +12,7 @@ const STYLE_ID = "heige-codex-skin-style";
 const MENU_ID = "heige-codex-skin-menu";
 const MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
 const REQUEST_ID = /^[a-f0-9]{32}$/;
+const THEME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const STABLE_VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const RELEASE_URL =
   /^https:\/\/github\.com\/HeiGeAi\/heige-codex-skin-studio\/releases\/tag\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
@@ -63,6 +65,14 @@ function safeEvaluationError(error) {
   return "目标连接或执行失败";
 }
 
+async function bringTargetToFront(session) {
+  // Best-effort：把目标页拉到前台，减轻 Windows 后台节流导致的「要点一下才继续」。
+  if (typeof session?.send !== "function") return;
+  try {
+    await session.send("Page.bringToFront");
+  } catch {}
+}
+
 async function evaluateTargets(targets, expression, Session) {
   const succeeded = [];
   const failed = [];
@@ -71,6 +81,7 @@ async function evaluateTargets(targets, expression, Session) {
     try {
       session = new Session(target.webSocketDebuggerUrl);
       await session.open();
+      await bringTargetToFront(session);
       succeeded.push(safeTarget(target, { value: await session.evaluate(expression) }));
     } catch (error) {
       failed.push(safeTarget(target, { error: safeEvaluationError(error) }));
@@ -330,6 +341,7 @@ export async function skinStatus({ port, includeControlRequest = false, deps = {
     let themeId = document.documentElement.dataset.heigeCodexSkin ?? null;
     let persistenceEnabled = false;
     let revision = 0;
+    let themeTransitionPending = false;
     let controlRequest = null;
     try {
       if (typeof status?.generation === "string") generation = status.generation;
@@ -337,6 +349,7 @@ export async function skinStatus({ port, includeControlRequest = false, deps = {
       if (typeof status?.themeId === "string" || status?.themeId === null) themeId = status.themeId;
       persistenceEnabled = status?.persistenceEnabled === true;
       if (Number.isSafeInteger(status?.revision) && status.revision >= 0) revision = status.revision;
+      themeTransitionPending = status?.themeTransitionPending === true;
       const request = status?.controlRequest;
       if (includeControlRequest && request === null) controlRequest = null;
       if (
@@ -395,6 +408,7 @@ export async function skinStatus({ port, includeControlRequest = false, deps = {
       menu,
       persistenceEnabled,
       revision,
+      themeTransitionPending,
       ...(includeControlRequest ? { controlRequest } : {})
     };
   })()`;
@@ -504,6 +518,85 @@ export async function deliverUpdateCheckResult({
     throw targetError(
       "UPDATE_RESULT_NOT_DELIVERED",
       "更新检查结果未被当前主题面板接收",
+      results,
+    );
+  }
+  return {
+    delivered,
+    failed: evaluated.failed.map(({ id }) => id),
+    results,
+  };
+}
+
+function normalizedThemeSelectionDelivery({
+  requestId,
+  themeId,
+  revision,
+  persistenceEnabled,
+}) {
+  if (
+    typeof requestId !== "string" ||
+    !REQUEST_ID.test(requestId) ||
+    !(
+      themeId === NATIVE_THEME_ID ||
+      (typeof themeId === "string" && THEME_ID.test(themeId))
+    ) ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0 ||
+    typeof persistenceEnabled !== "boolean"
+  ) {
+    throw new Error("主题选择确认结果无效");
+  }
+  return {
+    schemaVersion: 1,
+    requestId,
+    themeId,
+    revision,
+    persistenceEnabled,
+  };
+}
+
+export async function deliverThemeSelectionResult({
+  port,
+  requestId,
+  themeId,
+  revision,
+  persistenceEnabled,
+  deps = {},
+}) {
+  const payload = normalizedThemeSelectionDelivery({
+    requestId,
+    themeId,
+    revision,
+    persistenceEnabled,
+  });
+  const fetchTargets = deps.fetchRendererTargets ?? fetchRendererTargets;
+  const Session = deps.Session ?? CdpSession;
+  const expression = `(() => {
+    try {
+      return window.__heigeCodexSkinRuntime?.receiveThemeSelectionResult?.(
+        ${JSON.stringify(payload)}
+      ) === true;
+    } catch {
+      return false;
+    }
+  })()`;
+  const classified = classifyCodexTargets(await fetchTargets(port));
+  const targets = classified.filter(({ kind }) => kind === "main");
+  if (targets.length === 0) {
+    throw targetError(
+      "NO_MAIN_RENDERER",
+      "未发现经过严格识别的 Codex 主窗口 renderer",
+      resultsFor(classified, { succeeded: [], failed: [] }),
+    );
+  }
+  const evaluated = await evaluateTargets(targets, expression, Session);
+  const results = resultsFor(classified, evaluated);
+  const delivered = evaluated.succeeded.filter(({ value }) => value === true).length;
+  if (delivered === 0) {
+    throw targetError(
+      "THEME_RESULT_NOT_DELIVERED",
+      "主题选择结果未被当前主题面板接收",
       results,
     );
   }
