@@ -278,7 +278,7 @@ test("Windows ACL adapter isolates Windows PowerShell modules from the parent ru
     /Import-Module[^\n]+\$PSHOME[^\n]+Microsoft\.PowerShell\.Security/,
   );
   assert.match(windowsAclPowerShellScript, /Microsoft\.PowerShell\.Security\\Get-Acl/);
-  assert.match(windowsAclPowerShellScript, /Microsoft\.PowerShell\.Security\\Set-Acl/);
+  assert.match(windowsAclPowerShellScript, /\$item\.SetAccessControl\(\$acl\)/);
 });
 
 test("Windows ACL adapter preserves the canonical request path instead of rewriting 8.3 aliases", async () => {

@@ -108,20 +108,20 @@ foreach ($entry in $operations) {
     }
     $acl.AddAccessRule($rule) | Out-Null
     try {
-      Microsoft.PowerShell.Security\Set-Acl -LiteralPath $TargetPath -AclObject $acl -ErrorAction Stop
+      $item.SetAccessControl($acl)
     } catch {
-      # 部分账户/会话没有 SeSecurityPrivilege；与 Windows 安装脚本一致，回退 icacls。
-      # fallback 必须与 Set-Acl 路径保持同一精确契约：setowner + 重置 grant + 随后 exact verify。
+      # 部分账户/会话不能直接设置 ACL；回退 icacls。
+      # fallback 必须与直接设置路径保持同一精确契约：setowner + 重置 grant + 随后 exact verify。
       $detail = [string]$_.Exception.Message
       $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
       if (-not (Test-Path -LiteralPath $icacls -PathType Leaf)) {
-        throw "Set-Acl failed and icacls is unavailable: $detail"
+        throw "SetAccessControl failed and icacls is unavailable: $detail"
       }
       $sidText = [string]$currentSid.Value
       $grant = if ($isDirectory) { '*{0}:(OI)(CI)F' -f $sidText } else { '*{0}:F' -f $sidText }
       $output = & $icacls $TargetPath /inheritance:r /setowner $sidText /grant:r $grant 2>&1
       if ($LASTEXITCODE -ne 0) {
-        throw ("Set-Acl failed and icacls fallback failed: {0}; icacls: {1}" -f $detail, (($output | ForEach-Object { [string]$_ }) -join ' '))
+        throw ("SetAccessControl failed and icacls fallback failed: {0}; icacls: {1}" -f $detail, (($output | ForEach-Object { [string]$_ }) -join ' '))
       }
     }
   }

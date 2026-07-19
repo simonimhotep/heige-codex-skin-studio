@@ -789,9 +789,24 @@ function Set-HeiGePrivatePathAcl {
         if ($SetAclProvider) {
             & $SetAclProvider $Path $AclObject | Out-Null
         } else {
-            Set-Acl -LiteralPath $Path -AclObject $AclObject -ErrorAction Stop
+            $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ("System.IO.FileSystemAclExtensions" -as [type]) {
+                if ($item.PSIsContainer) {
+                    [System.IO.FileSystemAclExtensions]::SetAccessControl(
+                        [System.IO.DirectoryInfo]$item,
+                        [System.Security.AccessControl.DirectorySecurity]$AclObject
+                    )
+                } else {
+                    [System.IO.FileSystemAclExtensions]::SetAccessControl(
+                        [System.IO.FileInfo]$item,
+                        [System.Security.AccessControl.FileSecurity]$AclObject
+                    )
+                }
+            } else {
+                $item.SetAccessControl($AclObject)
+            }
         }
-        return [pscustomobject][ordered]@{ Method = "Set-Acl"; Path = $Path }
+        return [pscustomobject][ordered]@{ Method = "SetAccessControl"; Path = $Path }
     } catch {
         $detail = [string]$_.Exception.Message
         $current = $_.Exception
