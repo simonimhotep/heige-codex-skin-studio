@@ -43,7 +43,17 @@ test("builds one fast generic skin from a theme and image data URL", () => {
   );
   assert.match(
     css,
-    /\.composer-surface-chrome,[\s\S]*background:\s*color-mix\(in srgb, var\(--heige-surface\) 60%, transparent\)/,
+    /\.composer-surface-chrome,[\s\S]*background:\s*color-mix\(in srgb, var\(--heige-surface\) 80%, transparent\)/,
+  );
+  assert.match(
+    css,
+    /\.composer-surface-chrome,[\s\S]*backdrop-filter:\s*blur\(8px\)/,
+    "气泡/输入框模糊半径上限 8px：盖在流式内容上的大模糊是卡顿主因",
+  );
+  assert.doesNotMatch(
+    css,
+    /background-attachment:\s*fixed|no-repeat\s+fixed/,
+    "皮肤背景禁用 fixed 附着：滚动/流式 relayout 会强制整视口逐帧重绘",
   );
   assert.doesNotMatch(
     css,

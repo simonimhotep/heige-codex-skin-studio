@@ -57,7 +57,8 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--heige-surface) 96%, transparent) 0 22%, transparent 46%),
     linear-gradient(180deg, transparent 0 45%, color-mix(in srgb, var(--heige-surface) 78%, transparent) 78% 100%),
-    url(${JSON.stringify(heroDataUrl)}) right center / cover no-repeat fixed !important;
+    /* 不用 fixed 背景附着：流式输出/滚动时会强制整视口逐帧重绘 */
+    url(${JSON.stringify(heroDataUrl)}) right center / cover no-repeat !important;
 }
 
 #root::before {
@@ -88,7 +89,8 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
 .app-shell-left-panel {
   background: color-mix(in srgb, var(--heige-surface) 88%, transparent) !important;
   border-right: 1px solid color-mix(in srgb, var(--heige-accent) 45%, transparent) !important;
-  backdrop-filter: blur(20px) saturate(1.12);
+  /* blur 从 20px 降到 8px：背板是高频变化的对话区，大半径模糊会逐帧重采样 */
+  backdrop-filter: blur(8px) saturate(1.12);
 }
 
 .main-surface,
@@ -120,9 +122,10 @@ export function buildSkinCss({ theme, heroDataUrl, logoDataUrl = null, polaroidD
 [data-codex-approval-surface] {
   color: var(--heige-text) !important;
   border: 1px solid color-mix(in srgb, var(--heige-accent) 24%, transparent) !important;
-  background: color-mix(in srgb, var(--heige-surface) 60%, transparent) !important;
+  /* 不透明度 60%→80%、blur 22px→8px：气泡盖在流式内容上，大模糊是卡顿主因 */
+  background: color-mix(in srgb, var(--heige-surface) 80%, transparent) !important;
   box-shadow: 0 8px 24px color-mix(in srgb, var(--heige-accent) 12%, transparent) !important;
-  backdrop-filter: blur(22px) saturate(1.08);
+  backdrop-filter: blur(8px) saturate(1.08);
 }
 
 [data-app-action-sidebar-thread-active="true"] {

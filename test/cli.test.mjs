@@ -1910,7 +1910,7 @@ test("background login with no one-shot request follows the latest revision with
   assert.deepEqual(events, ["claim", "start", "stop"]);
 });
 
-test("a healthy background controller keeps the one-second interaction cadence", async () => {
+test("a healthy background controller keeps the ten-second interaction cadence", async () => {
   const waits = [];
   const result = await runControllerProcess({
     start: async () => ({
@@ -1932,7 +1932,7 @@ test("a healthy background controller keeps the one-second interaction cadence",
   });
 
   assert.equal(result.action, "unregister");
-  assert.deepEqual(waits, [1000]);
+  assert.deepEqual(waits, [10_000]);
 });
 
 function postControl(control, input) {

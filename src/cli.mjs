@@ -20,6 +20,7 @@ import {
   classifyInjection,
   discoverCodex,
   listCodexProcesses,
+  parseCodexProcessTable,
   resolveCodexApp,
   runtimeDiagnostics,
   sameProcessIdentity,
@@ -1216,12 +1217,25 @@ export async function productionController({
   const probeWindows = platform === "win32"
     ? createWindowsRuntimeProbe({ port, queryWindowsRuntime })
     : null;
+  let lastKnownCdpPid = null;
   const probe = async () => {
     if (platform === "win32") return probeWindows();
     const app = await resolveCodexApp({ platform });
+    // 快速路径：上次确认的 pid 仍指向同一 CDP 进程时，用单行 ps 代替全表扫描。
+    // lstart+命令行双重校验由 parseCodexProcessTable 完成，身份漂移则落回全表。
+    if (lastKnownCdpPid !== null) {
+      try {
+        const { stdout } = await execFile("/bin/ps", ["-p", String(lastKnownCdpPid), "-o", "pid=,lstart=,command="]);
+        const hit = parseCodexProcessTable(stdout, app)
+          .filter((entry) => entry.pid === lastKnownCdpPid && entry.cdpPort === port);
+        if (hit.length === 1) return publicProcess(hit[0]);
+      } catch {}
+      lastKnownCdpPid = null;
+    }
     const candidates = (await listCodexProcesses({ app })).filter((entry) => entry.cdpPort === port);
     if (candidates.length === 0) return null;
     if (candidates.length !== 1) throw new Error("Codex 进程身份不唯一");
+    lastKnownCdpPid = candidates[0].pid;
     return publicProcess(candidates[0]);
   };
   const controllerPortOwnerValidator = createControllerPortOwnerValidator({
@@ -1550,7 +1564,9 @@ export async function runControllerProcess(controller, {
     return result;
   }
   while (true) {
-    await wait(1000);
+    // 健康巡检 1s→10s：皮肤丢失的感知容忍度是十秒级，
+    // 1Hz 巡检意味着每秒 fork 多个 ps/lsof + 一次完整 CDP 握手，纯属持续税。
+    await wait(10_000);
     result = await controller.tick();
     if (result.action === "unregister" || result.action === "handoff") {
       await controller.stop();
