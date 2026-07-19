@@ -2574,6 +2574,16 @@ async function readWindowsOwnerDirectoryAllowingHeal(
     return await readWindowsOwnerDirectory(path, security, { allowMissing });
   } catch (error) {
     if (
+      allowMissing &&
+      error instanceof OperationLockError &&
+      error.code === "LOCK_MALFORMED" &&
+      /lacks owner\.json/.test(error.message)
+    ) {
+      // rename 以含 owner.json 的完整 staging 原子发布；缺文件的目录只能是崩溃残留，不得阻塞 acquire。
+      await rm(path, { recursive: true, force: true }).catch(() => {});
+      return null;
+    }
+    if (
       !allowMissing ||
       !(error instanceof OperationLockError) ||
       error.code !== "LOCK_PERMISSIONS"
@@ -2601,6 +2611,10 @@ async function cleanupWindowsArtifacts({ stateRoot, lockPath, security, readProc
       // Released/staging leftovers with broken ACLs must not block a fresh acquire.
       if (disposable && error?.code === "LOCK_PERMISSIONS") {
         await rm(path, { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
+      // 并发 writer 可能刚 mkdir staging、尚未写出 owner.json；勿把竞态抬成致命 LOCK_MALFORMED。
+      if (disposable && error?.code === "LOCK_MALFORMED") {
         continue;
       }
       throw error;
