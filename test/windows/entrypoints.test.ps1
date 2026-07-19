@@ -1270,6 +1270,203 @@ try {
         Assert-Match 'Codex 保持原生界面运行' $wrapper
     }
 
+    Test-Case "Close Codex reports AlreadyStopped without calling Close or Stop" {
+        $script:Events = @()
+        $result = Invoke-HeiGeCloseCodexFlow -Root $script:InstallRoot `
+            -ContextProvider { New-TestEntrypointContext } `
+            -ProcessProvider { param($Context) @() } `
+            -CloseProvider {
+                param($Process)
+                $script:Events += "close"
+            } `
+            -StopProvider {
+                param($Process)
+                $script:Events += "stop"
+            } `
+            -StopCodexProvider {
+                param($Context)
+                $script:Events += "stop-codex"
+                throw "should not stop when already closed"
+            }
+        Assert-True $result.AlreadyStopped
+        Assert-False $result.Closed
+        Assert-False $result.Escalated
+        Assert-True $result.VerifiedStopped
+        Assert-equal @() $script:Events
+    }
+
+    Test-Case "Close Codex gracefully closes a windowed owned process" {
+        $path = "C:\Program Files\Codex\Codex.exe"
+        $script:ModeRecords = @(New-TestCodexProcess -Id 4101 -ParentProcessId 1 -Path $path)
+        $script:Running = @([pscustomobject]@{
+            Id = 4101
+            Path = $path
+            ProcessName = "Codex"
+            MainWindowHandle = [IntPtr]42
+        })
+        $script:Events = @()
+        $result = Invoke-HeiGeCloseCodexFlow -Root $script:InstallRoot `
+            -ContextProvider { New-TestEntrypointContext } `
+            -ProcessProvider {
+                param($Context)
+                @($script:ModeRecords)
+            } `
+            -StopProcessProvider {
+                @($script:Running)
+            } `
+            -CloseProvider {
+                param($Process)
+                $script:Events += ("close:" + [int]$Process.Id)
+                $script:Running = @()
+                $script:ModeRecords = @()
+            } `
+            -StopProvider {
+                param($Process)
+                $script:Events += ("stop:" + [int]$Process.Id)
+            } `
+            -SleepProvider { param($Milliseconds) }
+        Assert-True $result.Closed
+        Assert-False $result.AlreadyStopped
+        Assert-False $result.Escalated
+        Assert-True $result.VerifiedStopped
+        Assert-equal @("close:4101") $script:Events
+    }
+
+    Test-Case "Close Codex escalates only owned main processes without HWND" {
+        $path = "C:\Program Files\Codex\Codex.exe"
+        # Mode graph includes a child; stop provider only exposes the main process so
+        # escalate cannot target foreign/backend PIDs or the owned child renderer.
+        $script:ModeRecords = @(
+            (New-TestCodexProcess -Id 4201 -ParentProcessId 1 -Path $path),
+            (New-TestCodexProcess -Id 4202 -ParentProcessId 4201 -Path $path)
+        )
+        $script:Running = @(
+            [pscustomobject]@{
+                Id = 4201
+                Path = $path
+                ProcessName = "Codex"
+                MainWindowHandle = [IntPtr]::Zero
+            }
+        )
+        $script:Events = @()
+        $result = Invoke-HeiGeCloseCodexFlow -Root $script:InstallRoot `
+            -ContextProvider { New-TestEntrypointContext } `
+            -ProcessProvider {
+                param($Context)
+                @($script:ModeRecords)
+            } `
+            -StopProcessProvider {
+                @($script:Running)
+            } `
+            -CloseProvider {
+                param($Process)
+                $script:Events += ("close:" + [int]$Process.Id)
+            } `
+            -StopProvider {
+                param($Process)
+                $script:Events += ("stop:" + [int]$Process.Id)
+                $script:Running = @($script:Running | Where-Object { [int]$_.Id -ne [int]$Process.Id })
+                $script:ModeRecords = @()
+            } `
+            -SleepProvider { param($Milliseconds) }
+        Assert-True $result.Closed
+        Assert-True $result.Escalated
+        Assert-True $result.VerifiedStopped
+        Assert-equal @("stop:4201") $script:Events
+    }
+
+    Test-Case "Close Codex refuses ambiguous multi-main ownership" {
+        $path = "C:\Program Files\Codex\Codex.exe"
+        Assert-Throws {
+            Invoke-HeiGeCloseCodexFlow -Root $script:InstallRoot `
+                -ContextProvider { New-TestEntrypointContext } `
+                -ProcessProvider {
+                    param($Context)
+                    @(
+                        (New-TestCodexProcess -Id 4301 -ParentProcessId 1 -Path $path),
+                        (New-TestCodexProcess -Id 4302 -ParentProcessId 1 -Path $path)
+                    )
+                } `
+                -StopCodexProvider {
+                    param($Context)
+                    throw "should not stop ambiguous ownership"
+                }
+        } "归属不唯一"
+    }
+
+    Test-Case "Close Codex ignores foreign and internal backend processes" {
+        $backend = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin\unit-test-close\codex.exe"
+        if (-not $env:LOCALAPPDATA) { throw "LOCALAPPDATA required" }
+        New-Item -ItemType Directory -Path (Split-Path $backend -Parent) -Force | Out-Null
+        New-Item -ItemType File -Path $backend -Force | Out-Null
+        try {
+            $context = New-TestEntrypointContext
+            $context.App = [pscustomobject]@{
+                Kind = "StoreAumid"
+                ExecutablePath = $null
+                InstallPath = "C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0"
+                ProductName = "Codex"
+                PackageFullName = "OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0"
+                Aumid = "OpenAI.Codex_2p2nqsd0c76g0!App"
+            }
+            $mode = Get-HeiGeEntrypointProcessMode -Context $context -ProcessProvider {
+                param($Context)
+                @(
+                    [pscustomobject]@{
+                        ProcessId = 4401
+                        ParentProcessId = 1
+                        ExecutablePath = $backend
+                        Name = "codex.exe"
+                    }
+                )
+            }
+            Assert-equal "closed" $mode
+            Assert-Throws {
+                Get-HeiGeEntrypointProcessMode -Context $context -ProcessProvider {
+                    param($Context)
+                    @(
+                        [pscustomobject]@{
+                            ProcessId = 4402
+                            ParentProcessId = 1
+                            ExecutablePath = "C:\Foreign\ChatGPT.exe"
+                            Name = "ChatGPT.exe"
+                        }
+                    )
+                }
+            } "不属于已绑定"
+        } finally {
+            Remove-Item -LiteralPath (Split-Path $backend -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Test-Case "Close Codex flow source contract forbids relaunch and taskkill" {
+        $flow = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\lib\entrypoints.ps1")
+        )
+        $match = [regex]::Match(
+            $flow,
+            'function Invoke-HeiGeCloseCodexFlow[\s\S]*?(?=\r?\nfunction )'
+        )
+        Assert-True $match.Success
+        $body = $match.Value
+        Assert-Match 'Stop-CodexNormally' $body
+        Assert-False ($body -match 'Start-Codex')
+        Assert-False ($body -match 'Restart-Codex')
+        Assert-False ($body -match 'taskkill')
+        Assert-False ($body -match 'set-persistence')
+        $wrapper = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\close-codex.ps1")
+        )
+        Assert-Match 'Invoke-HeiGeCloseCodexFlow' $wrapper
+        Assert-Match '本来就未运行' $wrapper
+        Assert-Match '保持关闭' $wrapper
+        $abort = Resolve-HeiGeBootstrapAbortClass -Doctor ([pscustomobject]@{
+            diagnosis = "flag-present-port-closed：进程已带调试参数但端口未开放"
+        })
+        Assert-equal "abort-incompatible" $abort.Class
+        Assert-Match 'close-codex\.bat' $abort.Guidance
+    }
+
     Test-Case "Uninstall cleans task shortcut state and install tree even when soft disable fails" {
         $uninstallRoot = Join-Path $script:Root ("heige-codex-skin-studio-" + [guid]::NewGuid().ToString("N"))
         $installTree = Join-Path $uninstallRoot "heige-codex-skin-studio"
@@ -1503,7 +1700,7 @@ try {
 
     Test-Case "BAT wrappers preserve the captured PowerShell failure code" {
         foreach ($name in @(
-            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat", "uninstall.bat"
+            "apply.bat", "customize.bat", "close-codex.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat", "uninstall.bat"
         )) {
             $source = [System.IO.File]::ReadAllText(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
@@ -1522,15 +1719,20 @@ try {
         Assert-Match 'Write-HeiGeInteractivePauseHint' $batExit
         Assert-Match '任务栏' $batExit
         Assert-Match 'HEIGE_PAUSE_HINT_STYLE' $batExit
+        Assert-Match 'HEIGE_PAUSE_HINT_STYLE -eq "close"' $batExit
         $uninstallBat = [System.IO.File]::ReadAllText(
             (Join-Path $script:RepositoryRoot "scripts\windows\uninstall.bat")
         )
         Assert-Match 'HEIGE_PAUSE_HINT_STYLE=uninstall' $uninstallBat
+        $closeBat = [System.IO.File]::ReadAllText(
+            (Join-Path $script:RepositoryRoot "scripts\windows\close-codex.bat")
+        )
+        Assert-Match 'HEIGE_PAUSE_HINT_STYLE=close' $closeBat
     }
 
     Test-Case "PowerShell entrypoints retain BOM and BAT wrappers retain CRLF" {
         foreach ($name in @(
-            "apply.ps1", "customize.ps1", "enable-skin.ps1", "pause.ps1", "resume.ps1", "restore.ps1", "uninstall.ps1"
+            "apply.ps1", "close-codex.ps1", "customize.ps1", "enable-skin.ps1", "pause.ps1", "resume.ps1", "restore.ps1", "uninstall.ps1"
         )) {
             $bytes = [System.IO.File]::ReadAllBytes(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
@@ -1538,7 +1740,7 @@ try {
             Assert-equal @(0xef, 0xbb, 0xbf) @($bytes[0], $bytes[1], $bytes[2])
         }
         foreach ($name in @(
-            "apply.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat", "uninstall.bat"
+            "apply.bat", "close-codex.bat", "customize.bat", "enable-skin.bat", "install.bat", "pause.bat", "resume.bat", "restore.bat", "uninstall.bat"
         )) {
             $text = [System.IO.File]::ReadAllText(
                 (Join-Path $script:RepositoryRoot ("scripts\windows\" + $name))
@@ -1560,6 +1762,7 @@ try {
             Assert-Match 'status[^\r\n]*只读|只读[^\r\n]*status' $text
             Assert-Match 'HeiGe 皮肤启动器' $text
             Assert-Match 'uninstall\.(ps1|bat)' $text
+            Assert-Match 'close-codex\.(ps1|bat)' $text
             Assert-Match '计划任务' $text
         }
     }
@@ -1613,6 +1816,9 @@ try {
         Assert-Match '`pause`[^\r\n]*当前会话' $skill
         Assert-Match '`resume`[^\r\n]*同一[^\r\n]*进程' $skill
         Assert-Match '`restore`[^\r\n]*关闭常驻' $skill
+        Assert-Match '`close-codex`[^\r\n]*保持关闭' $skill
+        Assert-Match '明确允许关闭' $skill
+        Assert-Match '不要关闭 Codex' $skill
     }
 
     Test-Case "Windows Skill installer forwards only to the packaged Windows payload" {
