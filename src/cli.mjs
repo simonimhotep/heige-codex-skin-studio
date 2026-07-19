@@ -637,6 +637,86 @@ export function createWindowsRuntimeProbe({ port, queryWindowsRuntime }) {
   return probe;
 }
 
+export function probeWindowsNativeProcessFromSnapshot(snapshot, { port } = {}) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Windows native probe port is invalid");
+  }
+  if (!Array.isArray(snapshot?.listeners)) {
+    throw new Error("Windows native probe snapshot is invalid");
+  }
+  // CDP 已在本机端口开放时，这不是“用户正常启动的原生 Codex”，不得触发 relaunch。
+  if (snapshot.listeners.length > 0) return null;
+  return classifyWindowsPreflightSnapshot(snapshot, {
+    port,
+    requirePort: false,
+  }).process;
+}
+
+export async function probeWindowsNativeProcess({ port, queryWindowsRuntime }) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Windows native probe port is invalid");
+  }
+  if (typeof queryWindowsRuntime !== "function") {
+    throw new Error("Windows native probe runtime query is required");
+  }
+  const snapshot = await queryWindowsRuntime({ port });
+  return probeWindowsNativeProcessFromSnapshot(snapshot, { port });
+}
+
+export async function spawnWindowsRestartIntoCdp({
+  port,
+  nativeProcess,
+  powershellPath = windowsPowerShellPath(),
+  scriptPath = join(repositoryRoot, "scripts", "windows", "lib", "restart-into-cdp.ps1"),
+  env = process.env,
+  spawnImpl = spawn,
+}) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Windows restart-into-cdp port is invalid");
+  }
+  const processIdentity = publicProcess(nativeProcess);
+  if (typeof powershellPath !== "string" || powershellPath.length === 0) {
+    throw new Error("Windows restart-into-cdp PowerShell path is invalid");
+  }
+  if (typeof scriptPath !== "string" || !win32.isAbsolute(scriptPath)) {
+    throw new Error("Windows restart-into-cdp script path must be absolute");
+  }
+  const identityToken = env?.HEIGE_WINDOWS_APP_IDENTITY;
+  if (typeof identityToken !== "string" || identityToken.length === 0) {
+    throw new Error("Windows restart-into-cdp requires HEIGE_WINDOWS_APP_IDENTITY");
+  }
+  const child = spawnImpl(powershellPath, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    scriptPath,
+    "-Port",
+    String(port),
+    "-ExpectedPid",
+    String(processIdentity.pid),
+    "-ExpectedExecutablePath",
+    processIdentity.executablePath,
+    "-ExpectedStartedAt",
+    processIdentity.startedAt,
+  ], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: {
+      ...isolatedWindowsPowerShellEnvironment(env),
+      HEIGE_WINDOWS_APP_IDENTITY: identityToken,
+    },
+  });
+  if (!child || (child.pid !== undefined && child.pid !== null && !Number.isSafeInteger(child.pid))) {
+    throw new Error("无法创建 Windows restart-into-cdp 后台进程");
+  }
+  if (typeof child.unref === "function") child.unref();
+  return { pid: child.pid ?? null };
+}
+
 export function createControllerPortOwnerValidator({
   platform,
   port,
@@ -902,16 +982,19 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function isLockHeldError(error) {
+function isTransientLockAcquisitionError(error) {
   try {
-    return error?.code === "LOCK_HELD";
+    const code = error?.code;
+    // LOCK_HELD：他人持有；LOCK_MALFORMED：staging 尚未写完 owner.json；
+    // LOCK_PERMISSIONS：他人仍打开目录时 protect/heal 会失败，属瞬时争用而非永久 ACL 损坏。
+    return code === "LOCK_HELD" || code === "LOCK_MALFORMED" || code === "LOCK_PERMISSIONS";
   } catch {
     return false;
   }
 }
 
 /**
- * Retry only while lock acquisition itself fails with LOCK_HELD.
+ * Retry only while lock acquisition itself fails with LOCK_HELD / LOCK_MALFORMED / LOCK_PERMISSIONS.
  * Once the protected action has started, failures fail closed without retry.
  */
 export async function withLockHeldRetry(
@@ -933,7 +1016,7 @@ export async function withLockHeldRetry(
     } catch (error) {
       if (
         error?.[LOCK_HELD_ACTION_STARTED] === true ||
-        !isLockHeldError(error) ||
+        !isTransientLockAcquisitionError(error) ||
         attempt >= delaysMs.length
       ) {
         throw error;
@@ -1065,7 +1148,11 @@ async function runWindowsControllerAction({
   stateRoot,
   revision,
   transitionNonce,
+  env = process.env,
 }) {
+  const identityToken = typeof env?.HEIGE_WINDOWS_APP_IDENTITY === "string"
+    ? env.HEIGE_WINDOWS_APP_IDENTITY
+    : "";
   const args = [
     "-NoProfile",
     "-NonInteractive",
@@ -1082,6 +1169,9 @@ async function runWindowsControllerAction({
     "-StateDirectory",
     stateRoot,
   ];
+  if (identityToken) {
+    args.push("-AppIdentityToken", identityToken);
+  }
   if (action === "start") {
     args.push(
       "-ExpectedRevision",
@@ -1090,8 +1180,12 @@ async function runWindowsControllerAction({
       transitionNonce,
     );
   }
-  const { stdout } = await execFile(windowsPowerShellPath(), args, {
-    env: isolatedWindowsPowerShellEnvironment(),
+  const childEnv = {
+    ...isolatedWindowsPowerShellEnvironment(env),
+    ...(identityToken ? { HEIGE_WINDOWS_APP_IDENTITY: identityToken } : {}),
+  };
+  const { stdout } = await execFile(windowsPowerShellPath(env), args, {
+    env: childEnv,
   });
   const text = stdout.trim();
   if (text.length === 0) return {};
@@ -1140,11 +1234,14 @@ export function createBackgroundReadinessVerifier({
     async verify({ revision, transitionNonce, handshakeRequest }) {
       verified = null;
       const notBefore = handshakeRequest?.notBefore;
+      // Windows 注册/拉起计划任务 + Node 冷启动 + 锁争用重试常超过 10s。
+      const timeoutMs = platform === "win32" ? 35_000 : 10_000;
       const observed = await wait({
         stateRoot,
         expected: expected({ revision, transitionNonce }),
         forbiddenPid,
         notBefore,
+        timeoutMs,
         readProcessIdentity: readIdentity,
       });
       const identity = observed.outcome === "ready" ? processIdentity(observed) : null;
@@ -1299,7 +1396,8 @@ export async function productionController({
       requestContext: context,
     }, action),
     probeCurrentProcess: probe,
-    // Windows 的重启必须走 scripts/windows 包装器，这条直连生命周期路径只在 macOS 成立。
+    // 常驻开启后，用户正常启动的 Codex 不带 CDP；后台控制器必须把它拉回调试模式再注入。
+    // macOS 走 lifecycle-helper；Windows 必须走 PowerShell Stop/Start-CodexWithCdp（detached）。
     ...(platform === "darwin"
       ? {
         probeNativeProcess: probeNative,
@@ -1318,6 +1416,18 @@ export async function productionController({
             platform,
           });
         },
+      }
+      : platform === "win32"
+      ? {
+        probeNativeProcess: () => probeWindowsNativeProcess({
+          port,
+          queryWindowsRuntime,
+        }),
+        restartIntoCdp: async ({ process: nativeProcess }) => spawnWindowsRestartIntoCdp({
+          port,
+          nativeProcess,
+          powershellPath: windowsPowerShellPath(),
+        }),
       }
       : {}),
     validatePortOwner: controllerPortOwnerValidator,
@@ -1466,6 +1576,22 @@ export async function productionController({
   });
 }
 
+/** 空闲健康巡检 10s；relaunch/注入/修复等交互跟随时 1s，避免 CDP 兜底最坏等一整拍。 */
+export function controllerTickWaitMs(previousResult) {
+  if (previousResult?.interactive === true) return 1_000;
+  const action = previousResult?.action;
+  if (
+    action === "relaunch" ||
+    action === "wait-for-app" ||
+    action === "inject" ||
+    action === "repair" ||
+    action === "paused"
+  ) {
+    return 1_000;
+  }
+  return 10_000;
+}
+
 export async function runControllerProcess(controller, {
   once = false,
   ephemeralRuntime = false,
@@ -1564,9 +1690,8 @@ export async function runControllerProcess(controller, {
     return result;
   }
   while (true) {
-    // 健康巡检 1s→10s：皮肤丢失的感知容忍度是十秒级，
-    // 1Hz 巡检意味着每秒 fork 多个 ps/lsof + 一次完整 CDP 握手，纯属持续税。
-    await wait(10_000);
+    // 空闲健康巡检保持 10s；交互态（relaunch/注入/CDP 兜底）用 1s，与健康税解耦。
+    await wait(controllerTickWaitMs(result));
     result = await controller.tick();
     if (result.action === "unregister" || result.action === "handoff") {
       await controller.stop();
