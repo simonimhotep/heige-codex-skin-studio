@@ -223,6 +223,7 @@ test("archive is a strict runtime allowlist with fixed metadata", async (t) => {
     "heige-codex-skin-studio/payload/scripts/windows/uninstall.bat",
     "heige-codex-skin-studio/payload/scripts/windows/uninstall.ps1",
     "heige-codex-skin-studio/payload/scripts/windows/lib/entrypoints.ps1",
+    "heige-codex-skin-studio/payload/scripts/windows/lib/restart-into-cdp.ps1",
     "heige-codex-skin-studio/payload/scripts/windows/lib/scheduled-task.ps1",
     "heige-codex-skin-studio/payload/package.json",
   ]) assert.ok(names.includes(required), required);
