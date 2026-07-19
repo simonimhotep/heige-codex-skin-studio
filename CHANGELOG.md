@@ -7,7 +7,8 @@
 - 修复顶部「皮肤常驻」开启慢/假等待：菜单 HTTP 超时由 3s 提到 15s（与主题保存一致），业务错误（含 `BACKGROUND_START_FAILED` 补偿关闭）立刻告警，不再误排队 CDP 兜底；CDP 兜底超时收至 20s。
 - 修复 Windows 开启常驻时前后台抢锁出现 `LOCK_MALFORMED`（staging 缺 `owner.json`）导致开启被补偿回关：锁获取对 `LOCK_MALFORMED` / 瞬时 `LOCK_PERMISSIONS` 做有界重试，清理并发 staging 时跳过未写完的目录，并显式传递 `AppIdentityToken`。
 - 修复提升权限会话下计划任务 `RunLevel=Limited` 与 High IL 锁目录冲突导致的 `LOCK_PERMISSIONS` / `BACKGROUND_START_FAILED`：注册进程若已提升，控制器任务改为 `Highest`；Windows 握手等待放宽到 35s。
-- 合入 Windows 常驻重启接管：用户正常启动不带 CDP 的 Codex 时，后台控制器会安全退出并以 CDP 重新拉起再注入（独立版/可开 CDP 环境；Store 屏蔽 9341 仍属环境限制）。
+- 合入 Windows 常驻重启接管：用户正常启动不带 CDP 的 Codex 时，后台控制器会安全退出并以 CDP 重新拉起再注入（独立版/可开 CDP 环境；Store 屏蔽 9341 仍属环境限制）。`restart-into-cdp` 改为附着等待完成并回传错误，避免 detached 子进程脱离交互会话后静默失败。
+- 修复 Windows 常驻任务 `Stop-ScheduledTask` 后 `Start-Process` 拉起的 Node 变孤儿、叠成双后台并写旧 handshake 的问题：启停/注销前按 task-name + state-directory 精确杀掉残留 `--background` 控制器；握手等待在「字段不匹配且 PID 已死」时清掉陈旧文档再继续等。
 
 ### 性能
 
@@ -16,6 +17,7 @@
 ### 测试
 
 - 新增常驻超时阈值、业务失败不排队 CDP、双节拍、锁重试与 Windows 握手 35s 等回归断言。
+- 新增 Windows 孤儿后台控制器精确清理、启停顺序（stop→orphan→start）与握手清陈旧死 PID 文档等回归断言。
 
 ## 5.4.4 - 2026-07-19
 
