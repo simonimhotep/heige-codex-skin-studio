@@ -1501,3 +1501,69 @@ function Restart-CodexWithoutCdp {
     }
     throw "Codex 已发起默认前端启动，但未在 20 秒内看到精确归属的运行进程。"
 }
+
+function Invoke-HeiGeRestartCodexIntoCdp {
+    param(
+        [ValidateRange(1024, 65535)][int]$Port = 9341,
+        [Parameter(Mandatory = $true)][ValidateRange(1, [int]::MaxValue)][int]$ExpectedPid,
+        [Parameter(Mandatory = $true)][string]$ExpectedExecutablePath,
+        [Parameter(Mandatory = $true)][string]$ExpectedStartedAt,
+        [Parameter(Mandatory = $true)]$AppInfo,
+        [scriptblock]$ProcessProvider,
+        [scriptblock]$StopProvider,
+        [scriptblock]$CloseProvider,
+        [scriptblock]$SleepProvider,
+        [scriptblock]$StartCdpProvider
+    )
+    if ([string]::IsNullOrWhiteSpace($ExpectedExecutablePath)) {
+        throw "restart-into-cdp 缺少期望的可执行路径。"
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedStartedAt)) {
+        throw "restart-into-cdp 缺少期望的进程启动时间。"
+    }
+    $expectedPath = Get-HeiGeFullPath -Path $ExpectedExecutablePath
+    $running = @(Get-RunningCodex -AppInfo $AppInfo -ProcessProvider $ProcessProvider)
+    $matched = @($running | Where-Object { [int]$_.Id -eq $ExpectedPid })
+    if ($matched.Count -ne 1) {
+        throw "期望的原生 Codex 进程已不存在，拒绝 restart-into-cdp。"
+    }
+    $live = $matched[0]
+    $livePath = Get-HeiGeFullPath -Path ([string]$live.Path)
+    if ($livePath.ToLowerInvariant() -cne $expectedPath.ToLowerInvariant()) {
+        throw "期望的原生 Codex 进程路径已变化，拒绝 restart-into-cdp。"
+    }
+    $liveStarted = $live.StartTime.ToUniversalTime().ToString("o")
+    if ($liveStarted -cne $ExpectedStartedAt) {
+        throw "期望的原生 Codex 进程启动时间已变化，拒绝 restart-into-cdp。"
+    }
+    if (Test-CdpEndpoint -Port $Port) {
+        $alreadyOwned = $false
+        try {
+            Get-CdpOwner -Port $Port -App $AppInfo | Out-Null
+            $alreadyOwned = $true
+        } catch {
+            $alreadyOwned = $false
+        }
+        if ($alreadyOwned) {
+            throw "Codex 已占用调试端口，拒绝对原生进程执行 restart-into-cdp。"
+        }
+    }
+    $stopArgs = @{ AppInfo = $AppInfo }
+    if ($ProcessProvider) { $stopArgs.ProcessProvider = $ProcessProvider }
+    if ($StopProvider) { $stopArgs.StopProvider = $StopProvider }
+    if ($CloseProvider) { $stopArgs.CloseProvider = $CloseProvider }
+    if ($SleepProvider) { $stopArgs.SleepProvider = $SleepProvider }
+    Stop-CodexNormally @stopArgs | Out-Null
+    if ($StartCdpProvider) {
+        & $StartCdpProvider $AppInfo $Port | Out-Null
+    } else {
+        $startArgs = @{ Port = $Port; AppInfo = $AppInfo }
+        if ($SleepProvider) { $startArgs.SleepProvider = $SleepProvider }
+        Start-CodexWithCdp @startArgs | Out-Null
+    }
+    return [pscustomobject][ordered]@{
+        Restarted = $true
+        CdpMode = $true
+        Port = $Port
+    }
+}
